@@ -1,0 +1,6 @@
+# Goal assignment: for each object label, where the final (goal) region should be.
+# Edit for each experimental run. Labels must match objects.yaml.
+assignments:
+  blue_bottle: C
+  red_box:     A
+  yellow_cup:  D

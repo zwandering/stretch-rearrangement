@@ -1,0 +1,59 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+
+Visualization Manager:
+  Global Options:
+    Fixed Frame: map
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Plane Cell Count: 30
+      Color: 160; 160; 160
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Marker Scale: 0.6
+    - Class: rviz_default_plugins/Map
+      Name: Occupancy Map
+      Topic: /map
+      Color Scheme: map
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Frontiers
+      Topic: /exploration/frontiers
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Regions
+      Topic: /regions/visualization
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Detected Objects
+      Topic: /detected_objects
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Plan
+      Topic: /planner/plan_visualization
+    - Class: rviz_default_plugins/Image
+      Name: Detector Debug Image
+      Topic: /detector/debug_image
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic: /scan
+      Size (m): 0.03
+      Color: 255; 170; 0
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic: /goal_pose
+
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 12
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 1.0
+      Yaw: 0.785

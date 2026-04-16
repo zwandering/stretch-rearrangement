@@ -1,0 +1,21 @@
+# HSV color ranges used by object_detector_node.
+# Tune these under your actual lighting conditions with the hsv_picker utility or
+# manual ROS image tooling. Ranges are OpenCV conventions: H [0,180], S [0,255], V [0,255].
+# For hues that wrap around zero (red), use the optional hsv_low_2 / hsv_high_2 pair.
+objects:
+  - name: blue_bottle
+    hsv_low:  [100, 120,  60]
+    hsv_high: [130, 255, 255]
+    min_area_px: 500
+
+  - name: red_box
+    hsv_low:  [  0, 130,  70]
+    hsv_high: [ 10, 255, 255]
+    hsv_low_2:  [170, 130,  70]
+    hsv_high_2: [180, 255, 255]
+    min_area_px: 500
+
+  - name: yellow_cup
+    hsv_low:  [ 20, 120, 120]
+    hsv_high: [ 35, 255, 255]
+    min_area_px: 500
