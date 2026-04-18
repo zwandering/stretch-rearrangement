@@ -39,9 +39,9 @@ from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 
 OBJECT_COLORS_BGR = {
-    'blue_bottle': (220, 60, 40),
-    'red_box':     (40, 40, 220),
-    'yellow_cup':  (0, 230, 230),
+    'white_bottle': (245, 245, 245),
+    'green_cup':    (40, 220, 40),
+    'blue_cup':     (220, 60, 40),
 }
 
 
@@ -81,13 +81,13 @@ class FakeSimNode(Node):
         self.ryaw = 0.0
 
         # Scene: all three objects start in A (+x,+y) so every task has to move.
-        #   blue_bottle (A) -> goal C
-        #   red_box     (C) -> goal A   (reversed from goal for motion)
-        #   yellow_cup  (A) -> goal D
+        #   white_bottle (A) -> goal C
+        #   green_cup    (C) -> goal A   (reversed from goal for motion)
+        #   blue_cup     (A) -> goal D
         self.objects: Dict[str, Optional[Tuple[float, float, float]]] = {
-            'blue_bottle': (1.5, 1.5, 0.4),
-            'red_box':     (1.5, -1.5, 0.4),
-            'yellow_cup':  (2.5, 0.5, 0.4),
+            'white_bottle': (1.5, 1.5, 0.4),
+            'green_cup':    (1.5, -1.5, 0.4),
+            'blue_cup':     (2.5, 0.5, 0.4),
         }
         self.held_object: Optional[str] = None
 

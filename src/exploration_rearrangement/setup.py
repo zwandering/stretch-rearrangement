@@ -21,6 +21,7 @@ setup(
         'opencv-python',
         'pyyaml',
         'openai>=1.30.0',
+        'ultralytics>=8.3.0',
     ],
     zip_safe=True,
     maintainer='Haokun Zhu',
@@ -32,12 +33,14 @@ setup(
         'console_scripts': [
             'exploration_node = exploration_rearrangement.exploration_node:main',
             'object_detector_node = exploration_rearrangement.object_detector_node:main',
+            'fine_object_detector_node = exploration_rearrangement.fine_object_detector_node:main',
             'region_manager_node = exploration_rearrangement.region_manager_node:main',
             'task_planner_node = exploration_rearrangement.task_planner_node:main',
             'task_executor_node = exploration_rearrangement.task_executor_node:main',
             'manipulation_node = exploration_rearrangement.manipulation_node:main',
             'head_scan_node = exploration_rearrangement.head_scan_node:main',
             'fake_sim_node = exploration_rearrangement.sim.fake_sim_node:main',
+            'set_up_yolo_e = exploration_rearrangement.set_up_yolo_e:main',
         ],
     },
 )

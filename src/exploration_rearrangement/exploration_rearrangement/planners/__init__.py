@@ -5,8 +5,7 @@ from .base import (
     PickPlaceTask,
     PlannerInput,
 )
-from .greedy import GreedyPlanner
-from .vlm import VLMPlanner
+from .vlm import VLMPlanner, VLMPlanError
 
 __all__ = [
     'PlannerBackend',
@@ -14,6 +13,6 @@ __all__ = [
     'RegionInfo',
     'PickPlaceTask',
     'PlannerInput',
-    'GreedyPlanner',
     'VLMPlanner',
+    'VLMPlanError',
 ]

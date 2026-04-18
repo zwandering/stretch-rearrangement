@@ -18,20 +18,29 @@ def generate_launch_description():
     tasks_yaml = PathJoinSubstitution([pkg, 'config', 'tasks.yaml'])
     rviz_cfg = PathJoinSubstitution([pkg, 'rviz', 'rearrangement.rviz'])
 
-    planner_backend = LaunchConfiguration('planner_backend')
     run_slam = LaunchConfiguration('run_slam')
     run_nav2 = LaunchConfiguration('run_nav2')
     run_rviz = LaunchConfiguration('run_rviz')
     start_on_launch = LaunchConfiguration('start_on_launch')
+    yolo_model = LaunchConfiguration('yolo_model')
+    vlm_model = LaunchConfiguration('vlm_model')
+    vlm_api_key_env = LaunchConfiguration('vlm_api_key_env')
+    instruction_topic = LaunchConfiguration('instruction_topic')
 
     args = [
-        DeclareLaunchArgument('planner_backend', default_value='greedy',
-                              description='greedy | vlm'),
         DeclareLaunchArgument('run_slam', default_value='true'),
         DeclareLaunchArgument('run_nav2', default_value='true'),
         DeclareLaunchArgument('run_rviz', default_value='true'),
         DeclareLaunchArgument('start_on_launch', default_value='false',
                               description='auto-trigger executor after launch'),
+        DeclareLaunchArgument('yolo_model', default_value='yoloe-11s-seg.pt',
+                              description='YOLOE weights or exported .engine path'),
+        DeclareLaunchArgument('vlm_model', default_value='gemini-2.5-flash',
+                              description='Gemini model id (OpenAI-compatible endpoint)'),
+        DeclareLaunchArgument('vlm_api_key_env', default_value='GEMINI_API_KEY',
+                              description='env var name holding the Gemini API key'),
+        DeclareLaunchArgument('instruction_topic', default_value='/instruction/text',
+                              description='topic to subscribe for operator instructions'),
     ]
 
     slam = GroupAction(
@@ -74,7 +83,18 @@ def generate_launch_description():
         package='exploration_rearrangement', executable='object_detector_node',
         name='object_detector_node', output='screen',
         parameters=[{
+            'mode': 'robot',
             'objects_yaml': objects_yaml,
+            'model_path': yolo_model,
+        }],
+    )
+    fine_detector = Node(
+        package='exploration_rearrangement', executable='fine_object_detector_node',
+        name='fine_object_detector_node', output='screen',
+        parameters=[{
+            'mode': 'robot',
+            'objects_yaml': objects_yaml,
+            'model_path': yolo_model,
         }],
     )
     regions = Node(
@@ -95,16 +115,16 @@ def generate_launch_description():
         package='exploration_rearrangement', executable='task_planner_node',
         name='task_planner_node', output='screen',
         parameters=[{
-            'planner_backend': planner_backend,
-            'tasks_yaml': tasks_yaml,
             'regions_yaml': regions_yaml,
+            'vlm_model': vlm_model,
+            'vlm_api_key_env': vlm_api_key_env,
+            'instruction_topic': instruction_topic,
         }],
     )
     executor = Node(
         package='exploration_rearrangement', executable='task_executor_node',
         name='task_executor_node', output='screen',
         parameters=[{
-            'planner_backend': planner_backend,
             'tasks_yaml': tasks_yaml,
             'regions_yaml': regions_yaml,
             'start_on_launch': start_on_launch,
@@ -118,6 +138,7 @@ def generate_launch_description():
 
     return LaunchDescription(args + [
         slam, nav2,
-        exploration, detector, regions, head_scan, manipulation, planner, executor,
+        exploration, detector, fine_detector, regions, head_scan,
+        manipulation, planner, executor,
         rviz,
     ])

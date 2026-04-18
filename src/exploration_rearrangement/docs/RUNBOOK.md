@@ -141,7 +141,7 @@ Rebuild after editing the config:
 colcon build --packages-select exploration_rearrangement --symlink-install
 ```
 
-### 2e. Tune HSV ranges in `objects.yaml`
+### 2e. Tune YOLOE prompts in `objects.yaml`
 
 While the detector is running (`mapping.launch.py` already started it), look at:
 
@@ -149,25 +149,31 @@ While the detector is running (`mapping.launch.py` already started it), look at:
 ros2 run rqt_image_view rqt_image_view /detector/debug_image
 ```
 
-If detections are flickering or missing, tune the HSV bounds in
-`config/objects.yaml`. OpenCV conventions: `H ∈ [0,180]`, `S/V ∈ [0,255]`.
-For red, use the wrap-around pair (`hsv_low_2` / `hsv_high_2`). Bump
-`min_area_px` to filter speckles.
+If an object is missed or confused with something else, edit
+`config/objects.yaml` and adjust the `prompts` list for that object. Multiple
+synonyms are allowed and all get mapped back to the same `name` (e.g.
+`["blue bottle", "blue water bottle"]`). Prefer short concrete phrases;
+avoid attributes the vision backbone wasn't trained on.
+
+If you want to switch model size or backend (e.g. exported OpenVINO for
+CPU-only Stretch 3), pass `yolo_model:=...` to `bringup.launch.py` or set
+the `model_path` parameter directly.
 
 After editing, restart only the detector node:
 
 ```bash
-ros2 lifecycle set /object_detector_node shutdown    # (if applicable)
-# or just Ctrl-C the launch and re-launch — symlink-install picks up YAML edits
+# Ctrl-C the launch and re-launch — symlink-install picks up YAML edits.
+# Prompts baked into exported artifacts (.engine / .onnx / _openvino_model)
+# require re-running `ros2 run exploration_rearrangement set_up_yolo_e`.
 ```
 
 ### 2f. Edit `tasks.yaml` for the goal assignment
 
 ```yaml
 assignments:
-  blue_bottle: C
-  red_box:     A
-  yellow_cup:  D
+  white_bottle: C
+  green_cup:    A
+  blue_cup:     D
 ```
 
 Labels MUST match `objects.yaml`. Region letters must match `regions.yaml`.
@@ -276,7 +282,7 @@ State: IDLE → HEAD_SCAN
 State: HEAD_SCAN → EXPLORE       # arm auto-stows here, then head sweeps
 State: EXPLORE → WAIT_OBJECTS
 State: WAIT_OBJECTS → PLAN
-Planned 3 tasks: blue_bottle→C, red_box→A, yellow_cup→D
+Planned 3 tasks: white_bottle→C, green_cup→A, blue_cup→D
 State: PLAN → NAV_TO_PICK
 State: NAV_TO_PICK → PICK
 State: PICK → NAV_TO_PLACE
@@ -341,9 +347,10 @@ These are *not* fixed in code — you must verify each per environment.
    the VLM planner falls back to a "no plan" output, which the executor
    reports as "Nothing to do." Set it before launching.
 
-6. **HSV under your lighting.** Defaults were tuned for diffuse indoor light.
-   Direct sunlight or fluorescent flicker will require re-tuning per §2e.
-   `/detector/debug_image` shows the live mask — use it.
+6. **YOLOE prompt/lighting behavior.** The text prompts default to generic
+   phrases; if your lighting or object finish confuses the model, add
+   synonyms in `config/objects.yaml` (see §2e). `/detector/debug_image`
+   overlays boxes + track ids — use it to confirm detections.
 
 7. **Stretch's two control modes.** The driver must be in `mode:=navigation`
    for Nav2; `manipulation_node` switches to `position` mode briefly during

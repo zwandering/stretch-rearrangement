@@ -1,4 +1,4 @@
-"""Unit tests for frontier extraction, color segmentation, and region polygon helpers."""
+"""Unit tests for frontier extraction, depth projection, and region polygon helpers."""
 
 from pathlib import Path
 import sys
@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from exploration_rearrangement.utils.frontier_utils import (  # noqa: E402
     extract_frontiers, grid_to_world, world_to_grid, score_frontier,
 )
-from exploration_rearrangement.utils.color_segmentation import (  # noqa: E402
-    ColorSpec, segment_color, segment_all, pixel_to_camera, annotate,
+from exploration_rearrangement.utils.depth_projection import (  # noqa: E402
+    pixel_to_camera,
 )
 from exploration_rearrangement.region_manager_node import (  # noqa: E402
     point_in_polygon, polygon_centroid,
@@ -65,50 +65,7 @@ def test_score_frontier_prefers_closer_larger():
     assert score_frontier(near, (0, 0)) < score_frontier(far, (0, 0))
 
 
-# -------- Color segmentation ------------------------------------------
-
-def _red_square_image(size=64):
-    img = np.zeros((size, size, 3), dtype=np.uint8)
-    img[20:44, 20:44] = (0, 0, 200)  # BGR red
-    return img
-
-
-def test_segment_color_detects_red():
-    img = _red_square_image()
-    spec = ColorSpec(
-        name='red_box',
-        hsv_low=(0, 120, 70), hsv_high=(10, 255, 255),
-        hsv_low_2=(170, 120, 70), hsv_high_2=(180, 255, 255),
-        min_area_px=100,
-    )
-    det = segment_color(img, spec)
-    assert det is not None
-    cx, cy = det.center_px
-    assert 28 <= cx <= 36 and 28 <= cy <= 36
-    assert det.area_px >= 400
-
-
-def test_segment_color_returns_none_on_blank():
-    img = np.zeros((64, 64, 3), dtype=np.uint8)
-    spec = ColorSpec(
-        name='red_box', hsv_low=(0, 120, 70), hsv_high=(10, 255, 255),
-        min_area_px=50,
-    )
-    assert segment_color(img, spec) is None
-
-
-def test_segment_all_multiple_specs():
-    img = np.zeros((64, 128, 3), dtype=np.uint8)
-    img[20:44, 10:34] = (0, 0, 200)     # red
-    img[20:44, 70:94] = (200, 0, 0)     # blue
-    specs = [
-        ColorSpec('red', (0, 120, 70), (10, 255, 255),
-                  (170, 120, 70), (180, 255, 255), min_area_px=100),
-        ColorSpec('blue', (100, 120, 60), (130, 255, 255), min_area_px=100),
-    ]
-    dets = segment_all(img, specs)
-    assert {d.label for d in dets} == {'red', 'blue'}
-
+# -------- Depth projection --------------------------------------------
 
 def test_pixel_to_camera_reasonable():
     depth = np.full((100, 100), 1000, dtype=np.uint16)  # 1 m
@@ -124,13 +81,14 @@ def test_pixel_to_camera_rejects_zero_depth():
     assert pixel_to_camera(depth, 25, 25, 500, 500, 25, 25) is None
 
 
-def test_annotate_runs():
-    img = _red_square_image()
-    spec = ColorSpec('red_box', (0, 120, 70), (10, 255, 255),
-                     (170, 120, 70), (180, 255, 255), min_area_px=100)
-    dets = segment_all(img, [spec])
-    out = annotate(img, dets)
-    assert out.shape == img.shape
+def test_pixel_to_camera_offset_pixel():
+    depth = np.full((100, 100), 2000, dtype=np.uint16)  # 2 m uniform
+    xyz = pixel_to_camera(depth, u=60, v=50, fx=500, fy=500, cx=50, cy=50)
+    assert xyz is not None
+    x, _, z = xyz
+    # 10 px off-axis at z=2m with fx=500 → x = 10*2/500 = 0.04 m
+    assert abs(z - 2.0) < 1e-3
+    assert abs(x - 0.04) < 1e-3
 
 
 # -------- Region polygon ----------------------------------------------
@@ -156,3 +114,73 @@ def test_polygon_centroid_square():
     cx, cy = polygon_centroid([(0, 0), (2, 0), (2, 2), (0, 2)])
     assert pytest.approx(cx) == 1.0
     assert pytest.approx(cy) == 1.0
+
+
+# -------- 3D detection dedup ------------------------------------------
+
+from exploration_rearrangement.object_detector_node import _dedup_candidates_3d  # noqa: E402
+
+
+def test_dedup_drops_lower_conf_when_within_threshold():
+    # Two different-class candidates within 0.1 m — weaker one must be dropped.
+    a = (0.9, 'blue_cup', None, (1.0, 0.0, 0.5))
+    b = (0.6, 'green_cup', None, (1.05, 0.02, 0.5))
+    kept = _dedup_candidates_3d([a, b], dedup_dist=0.25)
+    assert [k[1] for k in kept] == ['blue_cup']
+
+
+def test_dedup_keeps_both_when_far_apart():
+    a = (0.8, 'blue_cup', None, (1.0, 0.0, 0.5))
+    b = (0.7, 'green_cup', None, (2.0, 2.0, 0.5))
+    kept = _dedup_candidates_3d([a, b], dedup_dist=0.25)
+    assert sorted(k[1] for k in kept) == ['blue_cup', 'green_cup']
+
+
+def test_dedup_is_order_independent():
+    a = (0.4, 'green_cup', None, (1.0, 0.0, 0.5))
+    b = (0.9, 'blue_cup',  None, (1.1, 0.0, 0.5))
+    assert [k[1] for k in _dedup_candidates_3d([a, b], dedup_dist=0.25)] == ['blue_cup']
+    assert [k[1] for k in _dedup_candidates_3d([b, a], dedup_dist=0.25)] == ['blue_cup']
+
+
+def test_dedup_zero_threshold_keeps_everything():
+    a = (0.9, 'blue_cup', None, (1.0, 0.0, 0.5))
+    b = (0.6, 'green_cup', None, (1.0, 0.0, 0.5))
+    kept = _dedup_candidates_3d([a, b], dedup_dist=0.0)
+    assert len(kept) == 2
+
+
+# -------- Fine detector helpers ---------------------------------------
+
+from exploration_rearrangement.fine_object_detector_node import (  # noqa: E402
+    _ema_update,
+)
+
+
+def test_ema_update_initializes_on_none_prev():
+    out = _ema_update(None, (1.0, 2.0, 3.0), alpha=0.3)
+    assert out == (1.0, 2.0, 3.0)
+
+
+def test_ema_update_blends_with_alpha():
+    prev = (0.0, 0.0, 0.0)
+    out = _ema_update(prev, (1.0, 1.0, 1.0), alpha=0.25)
+    assert out == (0.25, 0.25, 0.25)
+
+
+def test_ema_update_alpha_one_takes_new_value():
+    out = _ema_update((5.0, 5.0, 5.0), (1.0, 2.0, 3.0), alpha=1.0)
+    assert out == pytest.approx((1.0, 2.0, 3.0))
+
+
+def test_ema_update_teleport_replaces_when_jump_exceeds_threshold():
+    prev = (0.0, 0.0, 0.0)
+    # jump of sqrt(2) ~ 1.41 m in xy, threshold 0.5 m → replace
+    out = _ema_update(prev, (1.0, 1.0, 0.5), alpha=0.3, teleport_dist=0.5)
+    assert out == (1.0, 1.0, 0.5)
+
+
+def test_ema_update_teleport_smooths_when_jump_under_threshold():
+    prev = (0.0, 0.0, 0.0)
+    out = _ema_update(prev, (0.1, 0.0, 0.0), alpha=0.5, teleport_dist=1.0)
+    assert out == pytest.approx((0.05, 0.0, 0.0))

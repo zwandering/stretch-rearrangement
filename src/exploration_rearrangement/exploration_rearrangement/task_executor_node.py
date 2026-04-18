@@ -23,7 +23,6 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from .planners import (
     DetectedObject,
-    GreedyPlanner,
     PickPlaceTask,
     PlannerBackend,
     PlannerInput,
@@ -153,15 +152,12 @@ class TaskExecutorNode(Node):
     # --- setup -----------------------------------------------------------
 
     def _build_backend(self) -> PlannerBackend:
-        name = str(self.get_parameter('planner_backend').value).lower()
-        if name == 'vlm':
-            return VLMPlanner(
-                model=str(self.get_parameter('vlm_model').value),
-                base_url=str(self.get_parameter('vlm_base_url').value),
-                api_key_env=str(self.get_parameter('vlm_api_key_env').value),
-                use_image=bool(self.get_parameter('vlm_use_image').value),
-            )
-        return GreedyPlanner()
+        return VLMPlanner(
+            model=str(self.get_parameter('vlm_model').value),
+            base_url=str(self.get_parameter('vlm_base_url').value),
+            api_key_env=str(self.get_parameter('vlm_api_key_env').value),
+            use_image=bool(self.get_parameter('vlm_use_image').value),
+        )
 
     def _load_tasks(self, path: str) -> Dict[str, str]:
         if not path:

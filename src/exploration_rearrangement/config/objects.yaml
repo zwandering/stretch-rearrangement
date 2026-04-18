@@ -1,21 +1,19 @@
-# HSV color ranges used by object_detector_node.
-# Tune these under your actual lighting conditions with the hsv_picker utility or
-# manual ROS image tooling. Ranges are OpenCV conventions: H [0,180], S [0,255], V [0,255].
-# For hues that wrap around zero (red), use the optional hsv_low_2 / hsv_high_2 pair.
+# YOLOE open-vocabulary detection config.
+#
+# Each object entry:
+#   name     : stable id used as tracker label / marker namespace / planner key.
+#              Must be unique and match entries in tasks.yaml.
+#   prompts  : text phrases fed to YOLOE.set_classes. Multiple synonyms are
+#              allowed and all get mapped back to this object's `name` at runtime.
+#
+# Keep the list to exactly the three target objects; the detector node expects
+# three trackable entries for the rearrangement task.
 objects:
-  - name: blue_bottle
-    hsv_low:  [100, 120,  60]
-    hsv_high: [130, 255, 255]
-    min_area_px: 500
+  - name: white_bottle
+    prompts: ["white bottle", "white water bottle"]
 
-  - name: red_box
-    hsv_low:  [  0, 130,  70]
-    hsv_high: [ 10, 255, 255]
-    hsv_low_2:  [170, 130,  70]
-    hsv_high_2: [180, 255, 255]
-    min_area_px: 500
+  - name: green_cup
+    prompts: ["green cup", "green mug"]
 
-  - name: yellow_cup
-    hsv_low:  [ 20, 120, 120]
-    hsv_high: [ 35, 255, 255]
-    min_area_px: 500
+  - name: blue_cup
+    prompts: ["blue cup", "blue mug"]

@@ -46,6 +46,7 @@ class PlannerInput:
     goal_assignment: Dict[str, str]              # object_label → region name
     robot_xy: Tuple[float, float]
     context_image_bgr: Optional[np.ndarray] = None
+    instruction: Optional[str] = None            # natural-language operator instruction
 
 
 class PlannerBackend(ABC):

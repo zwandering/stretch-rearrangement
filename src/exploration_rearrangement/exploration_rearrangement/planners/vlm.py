@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -20,13 +20,18 @@ from .base import (
     PlannerInput,
     filter_actionable,
 )
-from .greedy import GreedyPlanner
 
 
 DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/'
 DEFAULT_MODEL = 'gemini-2.5-flash'
+MAX_BACKOFF_SEC = 30.0
 
-SYSTEM_PROMPT = """You are a mobile-manipulation task planner for a Stretch 3 robot.
+
+class VLMPlanError(RuntimeError):
+    """Raised when the VLM planner cannot produce a plan (missing key, exhausted retries, etc.)."""
+
+
+SYSTEM_PROMPT_ASSIGNED = """You are a mobile-manipulation task planner for a Stretch 3 robot.
 You are given:
   • the robot's current (x, y) position in the map frame,
   • a list of detected target objects with (x, y) positions and their current semantic region,
@@ -47,6 +52,29 @@ minimizing total travel distance. Skip objects already in their goal region. Res
   4) Every object in the goal assignment that is not already placed must appear exactly once.
 """
 
+SYSTEM_PROMPT_INSTRUCTION = """You are a mobile-manipulation task planner for a Stretch 3 robot.
+You are given:
+  • the robot's current (x, y) position in the map frame,
+  • a list of detected target objects with (x, y) positions and their current semantic region,
+  • a list of semantic regions (name, polygon vertices, placement anchor),
+  • a natural-language instruction from a human operator.
+
+Interpret the instruction to decide which object goes to which region, then produce an ordered
+pick-and-place plan that minimizes total travel distance. Respect these rules:
+  1) Only act on objects mentioned or clearly implied by the instruction.
+  2) Skip any object that is already in its desired region.
+  3) target_region MUST be one of the region names listed in the prompt (exact match).
+  4) object_label MUST be one of the detected object labels (exact match).
+  5) Output STRICT JSON, no prose, matching the schema:
+     {
+       "reasoning": "<short explanation>",
+       "tasks": [
+         {"object_label": "<label>", "target_region": "<region name>", "order_index": <int>}
+       ]
+     }
+  6) order_index must start at 0 and increase by 1.
+"""
+
 
 class VLMPlanner(PlannerBackend):
 
@@ -58,7 +86,8 @@ class VLMPlanner(PlannerBackend):
         base_url: str = DEFAULT_BASE_URL,
         api_key_env: str = 'GEMINI_API_KEY',
         use_image: bool = True,
-        max_retries: int = 2,
+        max_retries: int = 5,
+        retry_base_sec: float = 1.0,
         log_path: Optional[str] = '/tmp/rearrangement_vlm_log.jsonl',
         logger: Optional[logging.Logger] = None,
     ) -> None:
@@ -67,39 +96,39 @@ class VLMPlanner(PlannerBackend):
         self.api_key_env = api_key_env
         self.use_image = use_image
         self.max_retries = max_retries
+        self.retry_base_sec = retry_base_sec
         self.log_path = Path(log_path) if log_path else None
         self.logger = logger or logging.getLogger('VLMPlanner')
-        self._fallback = GreedyPlanner()
         self._client = None
 
-    def _ensure_client(self) -> bool:
+    def _ensure_client(self) -> None:
         if self._client is not None:
-            return True
+            return
         api_key = os.environ.get(self.api_key_env)
         if not api_key:
-            self.logger.warning(
-                f'{self.api_key_env} not set; VLMPlanner will fall back to greedy.'
-            )
-            return False
+            raise VLMPlanError(f'{self.api_key_env} is not set')
         try:
             from openai import OpenAI
         except Exception as e:
-            self.logger.warning(f'openai package missing: {e}; falling back to greedy.')
-            return False
+            raise VLMPlanError(f'openai package unavailable: {e}') from e
         self._client = OpenAI(api_key=api_key, base_url=self.base_url)
-        return True
 
     def plan(self, inp: PlannerInput) -> List[PickPlaceTask]:
-        if not self._ensure_client():
-            return self._fallback.plan(inp)
+        self._ensure_client()
 
-        actionable = filter_actionable(inp)
-        if not actionable:
-            return []
+        instruction_mode = bool(inp.instruction) and not inp.goal_assignment
+        if instruction_mode:
+            system_prompt = SYSTEM_PROMPT_INSTRUCTION
+            prompt_text = self._build_instruction_prompt(inp)
+        else:
+            actionable_pre = filter_actionable(inp)
+            if not actionable_pre:
+                return []
+            system_prompt = SYSTEM_PROMPT_ASSIGNED
+            prompt_text = self._build_assigned_prompt(inp, actionable_pre)
 
-        prompt_text = self._build_text_prompt(inp, actionable)
         messages = [
-            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': self._build_user_content(prompt_text, inp)},
         ]
 
@@ -114,28 +143,26 @@ class VLMPlanner(PlannerBackend):
                 )
                 content = response.choices[0].message.content
                 plan_json = json.loads(content)
-                tasks = self._json_to_tasks(plan_json, inp, actionable)
+                tasks = self._json_to_tasks(plan_json, inp, instruction_mode)
                 self._log(prompt_text, plan_json, success=True)
                 return tasks
             except Exception as e:
                 last_err = f'{type(e).__name__}: {e}'
                 self.logger.warning(
-                    f'VLM attempt {attempt + 1} failed: {last_err}'
+                    f'VLM attempt {attempt + 1}/{self.max_retries + 1} failed: {last_err}'
                 )
-                time.sleep(1.0 * (2 ** attempt))
+                if attempt < self.max_retries:
+                    delay = min(self.retry_base_sec * (2 ** attempt), MAX_BACKOFF_SEC)
+                    time.sleep(delay)
 
-        self.logger.warning(
-            f'VLMPlanner giving up after {self.max_retries + 1} attempts '
-            f'({last_err}); falling back to greedy.'
-        )
         self._log(prompt_text, None, success=False, error=last_err)
-        return self._fallback.plan(inp)
+        raise VLMPlanError(
+            f'VLM planner failed after {self.max_retries + 1} attempts: {last_err}'
+        )
 
     # --- helpers ---------------------------------------------------------
 
-    def _build_text_prompt(
-        self, inp: PlannerInput, actionable: List[DetectedObject],
-    ) -> str:
+    def _scene_description(self, inp: PlannerInput) -> tuple:
         regions_desc = []
         for name, r in inp.regions.items():
             cx, cy = r.center
@@ -150,12 +177,18 @@ class VLMPlanner(PlannerBackend):
                 'label': o.label,
                 'pose': [round(o.pose_xy[0], 3), round(o.pose_xy[1], 3)],
                 'current_region': o.current_region,
-                'goal_region': inp.goal_assignment.get(o.label),
             }
             for o in inp.objects
         ]
-        actionable_labels = [o.label for o in actionable]
+        return regions_desc, objects_desc
 
+    def _build_assigned_prompt(
+        self, inp: PlannerInput, actionable: List[DetectedObject],
+    ) -> str:
+        regions_desc, objects_desc = self._scene_description(inp)
+        for od in objects_desc:
+            od['goal_region'] = inp.goal_assignment.get(od['label'])
+        actionable_labels = [o.label for o in actionable]
         return (
             'Robot pose (map frame): '
             f'[{round(inp.robot_xy[0], 3)}, {round(inp.robot_xy[1], 3)}]\n\n'
@@ -166,6 +199,23 @@ class VLMPlanner(PlannerBackend):
             'Goal assignment (label → region):\n'
             f'{json.dumps(inp.goal_assignment, indent=2)}\n\n'
             f'Objects still to place: {actionable_labels}\n\n'
+            'Return the JSON plan.'
+        )
+
+    def _build_instruction_prompt(self, inp: PlannerInput) -> str:
+        regions_desc, objects_desc = self._scene_description(inp)
+        region_names = list(inp.regions.keys())
+        object_labels = [o.label for o in inp.objects]
+        return (
+            'Robot pose (map frame): '
+            f'[{round(inp.robot_xy[0], 3)}, {round(inp.robot_xy[1], 3)}]\n\n'
+            f'Available region names (use these exact strings): {region_names}\n\n'
+            f'Detected object labels (use these exact strings): {object_labels}\n\n'
+            'Detected objects:\n'
+            f'{json.dumps(objects_desc, indent=2)}\n\n'
+            'Regions:\n'
+            f'{json.dumps(regions_desc, indent=2)}\n\n'
+            f'Operator instruction:\n"""\n{inp.instruction}\n"""\n\n'
             'Return the JSON plan.'
         )
 
@@ -187,13 +237,15 @@ class VLMPlanner(PlannerBackend):
         self,
         plan_json: dict,
         inp: PlannerInput,
-        actionable: List[DetectedObject],
+        instruction_mode: bool,
     ) -> List[PickPlaceTask]:
         raw = plan_json.get('tasks', [])
         reason = plan_json.get('reasoning', '')
-        obj_by_label = {o.label: o for o in actionable}
+        obj_by_label = {o.label: o for o in inp.objects}
         tasks: List[PickPlaceTask] = []
         seen: set = set()
+        derived_goals: Dict[str, str] = {}
+
         for i, entry in enumerate(raw):
             label = entry.get('object_label')
             target = entry.get('target_region')
@@ -203,8 +255,11 @@ class VLMPlanner(PlannerBackend):
                 continue
             if label in seen:
                 continue
-            seen.add(label)
             obj = obj_by_label[label]
+            if obj.current_region == target:
+                continue
+            seen.add(label)
+            derived_goals[label] = target
             place_xy = inp.regions[target].place_anchor[:2]
             tasks.append(PickPlaceTask(
                 object_label=label,
@@ -214,11 +269,16 @@ class VLMPlanner(PlannerBackend):
                 order_index=int(entry.get('order_index', i)),
                 reasoning=reason,
             ))
-        if len(tasks) < len(actionable):
-            for obj in actionable:
+
+        if not instruction_mode:
+            for obj in inp.objects:
+                target = inp.goal_assignment.get(obj.label)
+                if target is None or target not in inp.regions:
+                    continue
+                if obj.current_region == target:
+                    continue
                 if obj.label in seen:
                     continue
-                target = inp.goal_assignment[obj.label]
                 place_xy = inp.regions[target].place_anchor[:2]
                 tasks.append(PickPlaceTask(
                     object_label=obj.label,
@@ -228,6 +288,7 @@ class VLMPlanner(PlannerBackend):
                     order_index=len(tasks),
                     reasoning=reason + ' [auto-appended]',
                 ))
+
         tasks.sort(key=lambda t: t.order_index)
         for i, t in enumerate(tasks):
             t.order_index = i
