@@ -1,27 +1,56 @@
 # Visual Grasp Runbook
 
-IK target-following + D405 fine detection → visually-guided pick.
+Two-stage visually-guided pick: coarse approach with head camera, then fine
+grasp with gripper camera.
 
 ```
-  D405 RGB-D (gripper)
-        │
-        ▼
-  fine_object_detector_node          visual_grasp_node.py
-        │                                    │
-        │  /fine_detector/objects             │  subscribes
-        │  (Detection3DArray, base_link)  ───►│
-        │                                    │
-        ▲                                    │  publishes
-        │  /fine_detector/activate (Bool)  ◄──│
-        │                                    │
-        └────────────────────────────────────┘
+ ┌─────────────────── Stage 1: COARSE APPROACH ───────────────────┐
+ │                                                                 │
+ │  D435i RGB-D (head)                                             │
+ │        │                                                        │
+ │        ▼                                                        │
+ │  object_detector_node         visual_servo_arm_node             │
+ │        │                              │                         │
+ │        │  /detector/objects            │  subscribes             │
+ │        │  (Detection3DArray, map) ────►│                         │
+ │        │                              │                         │
+ │        └──────────────────────────────┘                         │
+ │                                                                 │
+ │  Loop:                                                          │
+ │    1. head detector publishes object 3D pose (map frame)        │
+ │    2. visual_servo_arm transforms to base_link                  │
+ │    3. IK target = object_pos + offset in gripper frame          │
+ │       (default: 10 cm in front of gripper)                      │
+ │    4. δ-step IK until gripper is near the offset goal           │
+ │    5. reached = True → stop                                     │
+ │                                                                 │
+ │  Result: gripper is positioned near the object, object is       │
+ │          now in the D405 gripper camera's field of view.        │
+ └─────────────────────────────────────────────────────────────────┘
 
-  Loop:
-    1. fine detector publishes object 3D pose in base_link
-    2. visual_grasp_node reads it, computes IK waypoint (δ step)
-    3. move_to_configuration → arm moves one increment
-    4. repeat until gripper–object distance < δ
-    5. pick(): close gripper → retract arm → deactivate detector
+                            ↓ operator runs Stage 2
+
+ ┌─────────────────── Stage 2: FINE GRASP ────────────────────────┐
+ │                                                                 │
+ │  D405 RGB-D (gripper)                                           │
+ │        │                                                        │
+ │        ▼                                                        │
+ │  fine_object_detector_node        visual_grasp_node             │
+ │        │                                  │                     │
+ │        │  /fine_detector/objects           │  subscribes         │
+ │        │  (Detection3DArray, base_link) ──►│                     │
+ │        │                                  │                     │
+ │        ▲                                  │  publishes           │
+ │        │  /fine_detector/activate (Bool) ◄─│                     │
+ │        │                                  │                     │
+ │        └──────────────────────────────────┘                     │
+ │                                                                 │
+ │  Loop:                                                          │
+ │    1. fine detector publishes refined pose in base_link         │
+ │    2. visual_grasp IK-steps gripper toward object               │
+ │    3. when distance < δ → close gripper, retract arm            │
+ │    4. deactivate fine detector                                  │
+ └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -30,38 +59,70 @@ IK target-following + D405 fine detection → visually-guided pick.
 
 | What | How to verify |
 |------|---------------|
-| Stretch driver running | `ros2 topic list \| grep /stretch/joint_states` |
-| D405 gripper camera publishing | `ros2 topic hz /gripper_camera/color/image_raw` |
-| TF tree includes `gripper_camera_color_optical_frame → base_link` | `ros2 run tf2_tools view_frames` |
-| Package built | `ros2 pkg executables exploration_rearrangement \| grep fine_object_detector_node` |
+| Stretch driver | `ros2 topic list \| grep /stretch/joint_states` |
+| Head D435i camera | `ros2 topic hz /camera/color/image_raw` |
+| Gripper D405 camera | `ros2 topic hz /gripper_camera/color/image_raw` |
+| TF tree complete | `ros2 run tf2_tools view_frames` |
+| Package built | `ros2 pkg executables exploration_rearrangement` |
 
-Start the Stretch driver first (all terminals need this):
+### Start the robot
 
 ```bash
-# Terminal 0 — robot driver (if not already running)
+# Terminal 0a — robot driver
 ros2 launch stretch_core stretch_driver.launch.py
+
+# Terminal 0b — head D435i camera
+ros2 launch stretch_core d435i_high_resolution.launch.py
+
+# Terminal 0c — gripper D405 camera
+ros2 launch stretch_core d405_basic.launch.py
 ```
+
+If the dedicated camera launch files don't exist, use realsense2_camera
+directly (see §8 Troubleshooting).
 
 ---
 
 ## 1. Build
 
 ```bash
-cd ~/Homework/16-762/project/stretch_rearrangement_ws
-colcon build --packages-select exploration_rearrangement --symlink-install
+cd ~/16762/jinyao/stretch-rearrangement
+colcon build --packages-select exploration_rearrangement
 source install/setup.bash
 ```
 
 ---
 
-## 2. Start the fine detector
-
-The fine detector sits idle until it receives `Bool(True)` on
-`/fine_detector/activate` — `target_following.py` sends this automatically,
-so you only need to start the node.
+## 2. Start the head detector (used by Stage 1)
 
 ```bash
-# Terminal 1 — fine object detector (robot mode)
+# Terminal 1 — head object detector (D435i, output in map frame)
+source install/setup.bash
+ros2 run exploration_rearrangement object_detector_node --ros-args \
+    -p mode:=robot \
+    -p model_path:=yoloe-11s-seg.pt \
+    -p objects_yaml:=$(ros2 pkg prefix --share exploration_rearrangement)/config/objects.yaml
+```
+
+If you don't have SLAM running and don't need the map frame, override:
+
+```bash
+    -p output_frame:=camera_color_optical_frame
+```
+
+Confirm it detects objects:
+
+```bash
+ros2 topic echo /detector/objects --once
+ros2 run rqt_image_view rqt_image_view /detector/debug_image
+```
+
+---
+
+## 3. Start the fine detector (used by Stage 2)
+
+```bash
+# Terminal 2 — fine object detector (D405, output in base_link)
 source install/setup.bash
 ros2 run exploration_rearrangement fine_object_detector_node --ros-args \
     -p mode:=robot \
@@ -69,185 +130,239 @@ ros2 run exploration_rearrangement fine_object_detector_node --ros-args \
     -p objects_yaml:=$(ros2 pkg prefix --share exploration_rearrangement)/config/objects.yaml
 ```
 
-Confirm it starts without errors. It will print the class list and then sit
-idle (`fine detector: ready …`).
+This node starts idle. It will be activated automatically by
+`visual_grasp_node` in Stage 2.
 
-### Debug mode (bench, single D435i, no robot)
+---
 
-If you don't have the Stretch but want to test detection logic with a
-standalone D435i:
+## 4. Stage 1 — Coarse approach (`visual_servo_arm_node`)
+
+Moves the gripper near the object using the head camera so the object
+enters the D405's field of view.
+
+### 4a. Set the target object name
+
+Edit `visual_servo_arm_node.py` line 44:
+
+```python
+self.target_object_name = 'white_bottle'   # must match objects.yaml
+```
+
+Adjust the gripper-frame offset if needed (line 42, default 10 cm ahead):
+
+```python
+self.offset_in_gripper = np.array([0.1, 0.0, 0.0])
+```
+
+### 4b. Run
 
 ```bash
-# start a D435i first
-ros2 launch realsense2_camera rs_launch.py \
-    enable_color:=true enable_depth:=true align_depth.enable:=true
+# Terminal 3 — coarse approach
+source install/setup.bash
+ros2 run exploration_rearrangement visual_servo_arm_node
+```
 
-# then run the fine detector in debug mode
-ros2 run exploration_rearrangement fine_object_detector_node --ros-args \
-    -p mode:=debug \
-    -p model_path:=yoloe-11s-seg.pt
+### 4c. What to expect
+
+```
+At Ready Pose
+Listening to /detector/objects for 'white_bottle'
+```
+
+The arm will IK-step toward the object. Each callback prints:
+
+```
+Solution Found
+IK Config
+     Base Rotation: ...
+     ...
+Distance to offset goal after move: 0.12 m
+```
+
+When the gripper reaches the offset goal:
+
+```
+Arm positioned — within delta of offset goal
+```
+
+The node stops. The object should now be visible in the D405 gripper camera.
+
+**Verify before moving to Stage 2:**
+
+```bash
+ros2 run rqt_image_view rqt_image_view /gripper_camera/color/image_raw
+# Confirm the target object is visible in the gripper camera feed.
 ```
 
 ---
 
-## 3. Start visual grasp node (with pick)
+## 5. Stage 2 — Fine grasp (`visual_grasp_node`)
 
-`visual_grasp_node.py` is a HelloNode script in the `manipulation/`
-directory. It needs `ik_ros_utils` and `ikpy` on its Python path.
+Closes in on the object using the gripper camera and picks it up.
 
-### 3a. Set the target object name
+### 5a. Set the target object name
 
-Before running, edit `visual_grasp_node.py` line 48 to set which object to
-track. The name must match one of the classes in `config/objects.yaml`:
+Edit `visual_grasp_node.py` line 45:
 
 ```python
-self.target_object_name = 'white_bottle'   # or 'green_cup', 'blue_cup'
+self.target_object_name = 'white_bottle'   # same as Stage 1
 ```
 
-### 3b. Run
+### 5b. Run
 
 ```bash
-# Terminal 2 — visual grasp (IK following + pick)
+# Terminal 4 — fine grasp (replaces Terminal 3 or run in a new one)
 source install/setup.bash
-cd ~/Homework/16-762/project/stretch_rearrangement_ws/src/exploration_rearrangement/exploration_rearrangement/manipulation
-python visual_grasp_node.py
+ros2 run exploration_rearrangement visual_grasp_node
 ```
 
-On launch it will:
-1. `stow_the_robot()`
-2. `move_to_ready_pose()` (READY\_POSE\_P2: lift 0.8 m, arm retracted,
-   wrist neutral, head looking left-down)
-3. Publish `Bool(True)` → `/fine_detector/activate` (wakes the fine
-   detector)
-4. Subscribe to `/fine_detector/objects` and start the IK tracking loop
-
-### What to expect
+### 5c. What to expect
 
 ```
 At Ready Pose
 Fine detector activated — waiting for detections
 ```
 
-Once the D405 sees the target object, the console will print IK solutions
-and distance updates every callback:
+Once the D405 detects the target:
 
 ```
 Solution Found
-IK Config
-     Base Rotation: 0.012
-     Base Translation: 0.003
-     Lift 0.78
-     Arm 0.15
-     Gripper Yaw: 0.01
-     Gripper Pitch: -0.09
-     Gripper Roll: 0.00
+IK Config ...
 Distance to goal after move: 0.083 m
 ```
 
-When the distance drops below `self.delta` (0.06 m):
+When within delta (0.06 m):
 
 ```
 Within delta threshold — picking object
 Pick complete
 ```
 
-The gripper closes, the arm retracts, and the fine detector is deactivated.
+Gripper closes → arm retracts → fine detector deactivated.
 
 ---
 
-## 4. Monitor / debug topics
-
-Open additional terminals to inspect what's happening:
+## 6. Monitor / debug topics
 
 ```bash
-# see the fine detector's 2D overlay (confirm YOLOE is detecting)
+# Stage 1 — head detector overlay
+ros2 run rqt_image_view rqt_image_view /detector/debug_image
+
+# Stage 2 — gripper detector overlay
 ros2 run rqt_image_view rqt_image_view /fine_detector/debug_image
 
-# echo the 3D detections (xyz in base_link)
-ros2 topic echo /fine_detector/objects
+# 3D detections
+ros2 topic echo /detector/objects          # head (map frame)
+ros2 topic echo /fine_detector/objects      # gripper (base_link frame)
 
-# check detection rate
+# Detection rates
+ros2 topic hz /detector/objects
 ros2 topic hz /fine_detector/objects
 
-# manually activate / deactivate the fine detector
+# RViz — 3D bbox visualization
+# Add → MarkerArray → /detector/bboxes_3d_markers
+# Add → MarkerArray → /fine_detector/bboxes_3d_markers
+
+# Manually toggle fine detector
 ros2 topic pub --once /fine_detector/activate std_msgs/Bool "{data: true}"
 ros2 topic pub --once /fine_detector/activate std_msgs/Bool "{data: false}"
 ```
 
 ---
 
-## 5. Tunable parameters
+## 7. Tunable parameters
 
-All tuned in `visual_grasp_node.py` `__init__`:
+### `visual_servo_arm_node` (Stage 1)
 
-| Variable | Default | What it does |
-|----------|---------|--------------|
-| `self.delta` | `0.06` | IK step size (m) **and** "close enough to pick" threshold. Smaller = more precise but slower convergence. |
-| `self.shift_x` | `0.04` | Grasp offset in base\_link x (forward). Compensates for the gap between the camera optical center and the physical grasp point. |
-| `self.shift_y` | `-0.03` | Grasp offset in base\_link y (left). |
-| `self.shift_z` | `0.03` | Grasp offset in base\_link z (up). Use `0.03` for bottles, `0.01` for cups. |
-| `self.target_object_name` | `None` | Which class from `objects.yaml` to track. **Must be set before running.** |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `self.delta` | `0.03` | IK step size (m) and "reached" threshold |
+| `self.offset_in_gripper` | `[0.1, 0, 0]` | Offset from object in gripper frame (m). `x=0.1` = 10 cm in front of gripper. Increase if the gripper bumps the object; decrease to get closer. |
+| `self.target_object_name` | `None` | Which class from `objects.yaml` to track. **Must be set.** |
 
-Fine detector parameters are set via `--ros-args -p`:
+### `visual_grasp_node` (Stage 2)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `self.delta` | `0.06` | IK step size and "close enough to pick" threshold |
+| `self.shift_x` | `0.04` | Grasp offset in base_link x. Compensates camera→grasp-point gap. |
+| `self.shift_y` | `-0.03` | Grasp offset in base_link y |
+| `self.shift_z` | `0.03` | Grasp offset in base_link z. `0.03` for bottles, `0.01` for cups. |
+| `self.target_object_name` | `None` | Same class as Stage 1. **Must be set.** |
+
+### Detector parameters (via `--ros-args -p`)
 
 | Param | Default | Notes |
 |-------|---------|-------|
-| `conf_threshold` | `0.30` | Raise if you get false positives at close range |
-| `ema_alpha` | `1.0` | `1.0` = no smoothing; lower (e.g. `0.3`) for temporal smoothing |
-| `clear_state_on_activate` | `true` | Forgets stale poses every time the detector is re-activated |
+| `conf_threshold` | `0.25` (head) / `0.30` (fine) | Raise if false positives |
+| `ema_alpha` | `1.0` | `1.0` = no smoothing; lower for temporal filtering |
+| `output_frame` | `map` (head) / `base_link` (fine) | Override for debug |
 
 ---
 
-## 6. Troubleshooting
+## 8. Troubleshooting
 
-### "No detections" — script waits forever
+### Cameras not publishing
+
+```bash
+# Check what's available
+ros2 topic list | grep camera
+
+# If no camera topics, start manually:
+# Head D435i
+ros2 launch realsense2_camera rs_launch.py \
+    camera_name:=camera \
+    enable_color:=true enable_depth:=true align_depth.enable:=true
+
+# Gripper D405
+ros2 launch realsense2_camera rs_launch.py \
+    camera_name:=gripper_camera \
+    enable_color:=true enable_depth:=true align_depth.enable:=true
+```
+
+### Stage 1: no detections from head camera
 
 | Check | Fix |
 |-------|-----|
-| Fine detector not running or crashed | Restart Terminal 1 |
-| D405 not publishing | `ros2 topic hz /gripper_camera/color/image_raw` — if 0, check `stretch_driver` or USB |
-| Target not in camera FOV | The ready pose points the arm forward; physically place the object in front of the gripper |
-| Wrong `target_object_name` | Must exactly match a `name` in `objects.yaml` (`white_bottle`, `green_cup`, `blue_cup`) |
-| Fine detector not activated | Check `ros2 topic echo /fine_detector/activate` — should show `data: true` |
+| `object_detector_node` not running | Start Terminal 1 |
+| No camera feed | `ros2 topic hz /camera/color/image_raw` |
+| Wrong `target_object_name` | Must match `objects.yaml` exactly |
+| Object not in head camera FOV | Place object in front of the robot |
+| TF `camera → map` missing | Run SLAM, or set `-p output_frame:=camera_color_optical_frame` |
 
-### IK fails ("IKPy did not find a valid solution")
+### Stage 1: arm doesn't reach the object
 
-- The object is too far or at an unreachable angle. Move the robot closer
-  to the object before starting.
-- Reduce `self.delta` to take smaller steps (avoids large jumps the solver
-  can't handle).
-- Check the IK joint limits in `ik_ros_utils.py` — the virtual base
-  rotation/translation bounds can be narrowed to prevent the solver from
-  relying too heavily on base movement.
+- Object too far → move the robot closer first
+- Reduce `self.delta` for smaller IK steps
+- Check IK joint limits in `ik_ros_utils.py`
 
-### Robot base moves too much
+### Stage 2: object not in gripper camera after Stage 1
 
-Per the code comments — three options:
+- Increase `self.offset_in_gripper[0]` in Stage 1 (approach from farther)
+- Check gripper camera is actually running:
+  `ros2 topic hz /gripper_camera/color/image_raw`
 
-1. **Reduce `self.delta`** so each step is smaller.
-2. **Gate base motion** manually: in `ik_ros_utils.move_to_configuration`,
-   only execute `rotate_mobile_base` / `translate_mobile_base` when the
-   magnitude exceeds a threshold.
-3. **Tighten IK base limits** in `ik_ros_utils.py` (the bounds on
-   `joint_base_rotation` and `joint_base_translation` in the URDF or the
-   chain).
+### Stage 2: IK fails or base moves too much
 
-### Gripper closes too early / too late
+- Reduce `self.delta` for smaller steps
+- Tighten base rotation/translation limits in `ik_ros_utils.py`
 
-Adjust `self.delta`. Larger = triggers pick from farther away (less
-precise). Smaller = needs to get very close before picking (may overshoot).
+### Stage 2: gripper closes too early / misses object
 
-Also check `shift_x/y/z` — these offsets account for the physical distance
-between the camera sensor and the actual grasp center. Wrong values mean
-the gripper aims at the wrong spot.
+- Adjust `shift_x/y/z` to compensate camera-to-grasp-point offset
+- Reduce `self.delta` for more precise approach
 
 ---
 
-## 7. Full terminal summary
+## 9. Full terminal summary
 
-| Terminal | Command |
-|----------|---------|
-| 0 | `ros2 launch stretch_core stretch_driver.launch.py` |
-| 1 | `ros2 run exploration_rearrangement fine_object_detector_node --ros-args -p mode:=robot -p model_path:=yoloe-11s-seg.pt -p objects_yaml:=...` |
-| 2 | `cd .../manipulation && python visual_grasp_node.py` |
-| 3 (optional) | `ros2 run rqt_image_view rqt_image_view /fine_detector/debug_image` |
+| Terminal | Command | Stage |
+|----------|---------|-------|
+| 0a | `ros2 launch stretch_core stretch_driver.launch.py` | — |
+| 0b | `ros2 launch stretch_core d435i_high_resolution.launch.py` | — |
+| 0c | `ros2 launch stretch_core d405.launch.py` | — |
+| 1 | `ros2 run exploration_rearrangement object_detector_node --ros-args -p mode:=robot -p model_path:=yoloe-11s-seg.pt -p objects_yaml:=...` | 1 |
+| 2 | `ros2 run exploration_rearrangement fine_object_detector_node --ros-args -p mode:=robot -p model_path:=yoloe-11s-seg.pt -p objects_yaml:=...` | 2 |
+| 3 | `ros2 run exploration_rearrangement visual_servo_arm_node` | 1 |
+| 4 | `ros2 run exploration_rearrangement visual_grasp_node` | 2 |
+| 5 (optional) | `ros2 run rqt_image_view rqt_image_view` | debug |
