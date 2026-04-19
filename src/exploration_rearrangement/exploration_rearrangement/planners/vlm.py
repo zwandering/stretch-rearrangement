@@ -132,6 +132,13 @@ class VLMPlanner(PlannerBackend):
             {'role': 'user', 'content': self._build_user_content(prompt_text, inp)},
         ]
 
+        self.logger.info(
+            f'[VLM input] model={self.model} mode='
+            f'{"instruction" if instruction_mode else "assigned"}\n'
+            f'--- system prompt ---\n{system_prompt}\n'
+            f'--- user prompt ---\n{prompt_text}'
+        )
+
         last_err: Optional[str] = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -142,6 +149,10 @@ class VLMPlanner(PlannerBackend):
                     temperature=0.0,
                 )
                 content = response.choices[0].message.content
+                self.logger.info(
+                    f'[VLM output] attempt {attempt + 1}/'
+                    f'{self.max_retries + 1}\n{content}'
+                )
                 plan_json = json.loads(content)
                 tasks = self._json_to_tasks(plan_json, inp, instruction_mode)
                 self._log(prompt_text, plan_json, success=True)

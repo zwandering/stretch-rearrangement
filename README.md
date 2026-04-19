@@ -42,6 +42,7 @@ ros2 launch stretch_nav2 offline_mapping.launch.py
 ros2 launch stretch_core d435i_low_resolution.launch.py
 
 # Terminal 3 — YOLOE detector (latches each object's map-frame position)
+ros2 run exploration_rearrangement set_up_yolo_e --format openvino
 ros2 launch exploration_rearrangement mapping.launch.py objects_snapshot:=$HOME/maps/myroom_objects.yaml yolo_model:=$PWD/yoloe-11s-seg_openvino_model
 ```
 
@@ -70,12 +71,9 @@ Point* to read off `(x, y)` for each corner.
 
 ```bash
 ros2 launch stretch_core stretch_driver.launch.py
-ros2 launch exploration_rearrangement bringup.launch.py \
-    map:=$HOME/maps/myroom.yaml \
-    objects_snapshot:=$HOME/maps/myroom_objects.yaml
+ros2 launch exploration_rearrangement bringup.launch.py map:=$HOME/maps/myroom.yaml objects_snapshot:=$HOME/maps/myroom_objects.yaml
 # In RViz: click "2D Pose Estimate" to localize.
-ros2 topic pub --once /instruction/text std_msgs/msg/String \
-    '{data: "put the blue bottle in region C"}'
+ros2 topic pub --once /instruction/text std_msgs/msg/String '{data: "put the blue bottle in region C"}'
 ros2 service call /executor/start std_srvs/srv/Trigger
 ```
 
@@ -98,9 +96,10 @@ the camera FOV.
 | `/detector/snapshot`       | `std_srvs/Trigger` service                  | operator → detector        |
 | `/executor/start`          | `std_srvs/Trigger` service                  | operator → executor        |
 
-The nav coordinator stops Nav2 when the base is within 1 m of each goal
-and publishes `"arrived"`. Tune that distance by editing
-`STOP_DISTANCE_M` at the top of `navigation_node.py`.
+The nav coordinator stops Nav2 when the base is within
+`STOP_DISTANCE_M` metres of each goal (currently `0.15`) and publishes
+`"arrived"`. Tune by editing the constant at the top of
+`navigation_node.py`.
 
 ## Building
 
@@ -119,10 +118,15 @@ pip install openai>=1.30.0 ultralytics>=8.3.0 numpy opencv-python pyyaml
 External ROS 2 packages: `stretch_nav2`, `nav2_bringup`, `nav2_map_server`
 (install via `apt install ros-${ROS_DISTRO}-...`).
 
+## Further reading
+
+- [`src/exploration_rearrangement/docs/VISUAL_GRASP_RUNBOOK.md`](src/exploration_rearrangement/docs/VISUAL_GRASP_RUNBOOK.md) — two-stage visual grasp: head-camera coarse approach + gripper-camera fine grasp.
+- [`src/exploration_rearrangement/docs/navigation_module.md`](src/exploration_rearrangement/docs/navigation_module.md) — `NavigationModule` topic protocol (`/nav/goals`, `/nav/control_flag`, `/nav/arrived_flag`).
+- [`src/exploration_rearrangement/docs/README.md`](src/exploration_rearrangement/docs/README.md) — index for the two docs above.
+
 ## Credits
 
 The `navigation_node.py` and the sample `maps/asangium.{yaml,pgm}` are
 vendored from
 [AuWeerachai/MobileManipulation](https://github.com/AuWeerachai/MobileManipulation),
-commit `e4b53e52`. See `src/exploration_rearrangement/docs/navigation_module.md`
-for the upstream protocol notes.
+commit `e4b53e52`.
