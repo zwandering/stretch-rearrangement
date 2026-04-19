@@ -43,6 +43,7 @@ setup(
             'fake_planner_inputs = exploration_rearrangement.sim.fake_planner_inputs:main',
             'set_up_yolo_e = exploration_rearrangement.set_up_yolo_e:main',
             'visual_grasp_node = exploration_rearrangement.visual_grasp_node:main',
+            'visual_servo_arm_node = exploration_rearrangement.visual_servo_arm_node:main',
         ],
     },
 )

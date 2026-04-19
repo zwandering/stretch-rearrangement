@@ -9,8 +9,8 @@
 # Keep the list to exactly the three target objects; the detector node expects
 # three trackable entries for the rearrangement task.
 objects:
-  - name: white_bottle
-    prompts: ["white bottle", "white water bottle"]
+  - name: yellow cup
+    prompts: ["yellow cup", "yellow mug"]
 
   - name: green_cup
     prompts: ["green cup", "green mug"]

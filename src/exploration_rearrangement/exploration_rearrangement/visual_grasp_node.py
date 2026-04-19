@@ -42,7 +42,7 @@ class IKVisualGrasp(HelloNode):
         self.shift_y = -0.03
         self.shift_z = 0.03 # 0.03 for bottle and 0.01 for cup
 
-        self.target_object_name = None   # ← set before running
+        self.target_object_name = "yellow cup"   # ← set before running
         self.picked = False
 
     # ── joint states ──────────────────────────────────────────────────
