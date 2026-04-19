@@ -19,6 +19,7 @@ import threading
 import tf2_ros
 from tf2_geometry_msgs import TransformStamped
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
 from vision_msgs.msg import Detection3DArray
 from .manipulation import ik_ros_utils as ik
 import ikpy
@@ -115,6 +116,9 @@ class IKVisualServoArm(HelloNode):
             if dist < self.delta:
                 print("Arm positioned — within delta of offset goal")
                 self.reached = True
+                self.target_object_name = None
+                self.reached_pub.publish(Bool(data=True))
+                print("Idle — handed over to visual_grasp_node")
 
     def _extract_target_as_pose_stamped(self, msg: Detection3DArray):
         """Convert the target detection into a PoseStamped so tf_buffer.transform works."""
@@ -143,21 +147,38 @@ class IKVisualServoArm(HelloNode):
 
         return waypoint_pos, waypoint_orient
 
+    def open_gripper(self):
+        self.move_to_pose({'gripper_aperture': 0.5}, blocking=True)
+
     def move_to_ready_pose(self):
-        self.move_to_pose(ik.READY_POSE_P2, blocking=True)
+        self.move_to_pose(ik.READY_POSE_P1, blocking=True)
+
+    def go_idle(self):
+        """Clear tracking target, stop controlling the arm."""
+        print("Going idle — clearing target")
+        self.target_object_name = None
+        self.reached = True
 
     def main(self):
         HelloNode.main(self, 'visual_servo_arm', 'visual_servo_arm', wait_for_first_pointcloud=False)
         self.logger = self.get_logger()
         self.callback_group = ReentrantCallbackGroup()
+
+        self.declare_parameter('target_object', '')
+        param_val = self.get_parameter('target_object').value
+        if param_val:
+            self.target_object_name = param_val
+
         self.joint_states_subscriber = self.create_subscription(JointState, '/stretch/joint_states', callback=self.joint_states_callback, qos_profile=1)
 
         self.stow_the_robot()
         self.move_to_ready_pose()
-        print("At Ready Pose")
+        self.open_gripper()
+        print("At Ready Pose — gripper open")
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.reached_pub = self.create_publisher(Bool, '/visual_servo/reached', 10)
         self.det_sub = self.create_subscription(
             Detection3DArray,
             '/detector/objects',
@@ -170,8 +191,15 @@ class IKVisualServoArm(HelloNode):
 
 def main():
     node = IKVisualServoArm()
-    node.main()
-    node.new_thread.join()
+    try:
+        node.main()
+        node.new_thread.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if not node.reached:
+            print("Aborted/cancelled — going idle")
+            node.go_idle()
 
 
 if __name__ == '__main__':

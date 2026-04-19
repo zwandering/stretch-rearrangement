@@ -72,7 +72,7 @@ grasp with gripper camera.
 ros2 launch stretch_core stretch_driver.launch.py
 
 # Terminal 0b — head D435i camera
-ros2 launch stretch_core d435i_high_resolution.launch.py
+ros2 launch stretch_core d435i_low_resolution.launch.py
 
 # Terminal 0c — gripper D405 camera
 ros2 launch stretch_core d405_basic.launch.py

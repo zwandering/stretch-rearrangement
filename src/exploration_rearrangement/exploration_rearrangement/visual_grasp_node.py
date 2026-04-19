@@ -136,13 +136,14 @@ class IKVisualGrasp(HelloNode):
     # ── pick ──────────────────────────────────────────────────────────
 
     def pick(self):
-        """Close gripper, retract arm, deactivate the fine detector."""
+        """Close gripper, retract arm, deactivate the fine detector, go idle."""
         print("Within delta threshold — picking object")
         self.picked = True
         self.move_to_pose({'gripper_aperture': -0.2}, blocking=True)
         self.move_to_pose({'joint_arm': 0.0}, blocking=True)
         self._set_fine_detector(False)
-        print("Pick complete")
+        self.target_object_name = None
+        print("Pick complete — idle (ready for place)")
 
     # ── fine-detector helpers ─────────────────────────────────────────
 
@@ -166,23 +167,28 @@ class IKVisualGrasp(HelloNode):
             'joint_head_tilt': ik.READY_POSE_P2['joint_head_tilt'],
         }, blocking=True)
 
-    # ── node entry point ──────────────────────────────────────────────
+    # ── handoff from visual_servo_arm ────────────────────────────────
 
-    def main(self):
-        HelloNode.main(self, 'visual_grasp', 'visual_grasp', wait_for_first_pointcloud=False)
-        self.logger = self.get_logger()
-        self.callback_group = ReentrantCallbackGroup()
-        self.joint_states_subscriber = self.create_subscription(
-            JointState, '/stretch/joint_states',
-            callback=self.joint_states_callback, qos_profile=1,
-        )
+    def open_gripper(self):
+        self.move_to_pose({'gripper_aperture': 0.5}, blocking=True)
 
-        self.stow_the_robot()
-        self.move_to_ready_pose()
-        print("At Ready Pose")
+    def go_idle(self):
+        """Deactivate fine detector, clear target, stop controlling."""
+        print("Going idle — deactivating detector, clearing target")
+        if self.started:
+            self._set_fine_detector(False)
+        self.target_object_name = None
+        self.picked = True
 
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+    def _on_servo_reached(self, msg: Bool):
+        """Stage 1 finished — start fine detection + IK grasp from current pose."""
+        if not msg.data or self.started:
+            return
+        self.started = True
+        print("Received handoff from visual_servo_arm — starting fine grasp")
+
+        self.open_gripper()
+        print("Gripper open — ready for fine approach")
 
         self.activate_pub = self.create_publisher(Bool, '/fine_detector/activate', 10)
 
@@ -197,11 +203,46 @@ class IKVisualGrasp(HelloNode):
         self._set_fine_detector(True)
         print("Fine detector activated — waiting for detections")
 
+    # ── node entry point ──────────────────────────────────────────────
+
+    def main(self):
+        HelloNode.main(self, 'visual_grasp', 'visual_grasp', wait_for_first_pointcloud=False)
+        self.logger = self.get_logger()
+        self.callback_group = ReentrantCallbackGroup()
+        self.started = False
+
+        self.declare_parameter('target_object', '')
+        param_val = self.get_parameter('target_object').value
+        if param_val:
+            self.target_object_name = param_val
+
+        self.joint_states_subscriber = self.create_subscription(
+            JointState, '/stretch/joint_states',
+            callback=self.joint_states_callback, qos_profile=1,
+        )
+
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        self.create_subscription(
+            Bool, '/visual_servo/reached',
+            self._on_servo_reached, 10,
+            callback_group=self.callback_group,
+        )
+        print("Waiting for /visual_servo/reached to start fine grasp...")
+
 
 def main():
     node = IKVisualGrasp()
-    node.main()
-    node.new_thread.join()
+    try:
+        node.main()
+        node.new_thread.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if not node.picked:
+            print("Aborted/cancelled — going idle")
+            node.go_idle()
 
 
 if __name__ == '__main__':
