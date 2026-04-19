@@ -151,7 +151,7 @@ class IKVisualServoArm(HelloNode):
         self.move_to_pose({'gripper_aperture': 0.5}, blocking=True)
 
     def move_to_ready_pose(self):
-        self.move_to_pose(ik.READY_POSE_P1, blocking=True)
+        self.move_to_pose(ik.READY_POSE_P2, blocking=True)
 
     def go_idle(self):
         """Clear tracking target, stop controlling the arm."""
