@@ -211,7 +211,8 @@ class IKVisualGrasp(HelloNode):
         self.callback_group = ReentrantCallbackGroup()
         self.started = False
 
-        self.declare_parameter('target_object', '')
+        if not self.has_parameter('target_object'):
+            self.declare_parameter('target_object', '')
         param_val = self.get_parameter('target_object').value
         if param_val:
             self.target_object_name = param_val
