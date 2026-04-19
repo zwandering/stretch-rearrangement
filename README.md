@@ -39,13 +39,10 @@ already brings the driver up.
 ros2 launch stretch_nav2 offline_mapping.launch.py
 
 # Terminal 2 — RealSense camera(s) onboard
-ros2 launch realsense2_camera rs_launch.py \
-    enable_color:=true enable_depth:=true \
-    align_depth.enable:=true pointcloud.enable:=true
+ros2 launch stretch_core d435i_low_resolution.launch.py
 
 # Terminal 3 — YOLOE detector (latches each object's map-frame position)
-ros2 launch exploration_rearrangement mapping.launch.py \
-    objects_snapshot:=$HOME/maps/myroom_objects.yaml
+ros2 launch exploration_rearrangement mapping.launch.py objects_snapshot:=$HOME/maps/myroom_objects.yaml yolo_model:=$PWD/yoloe-11s-seg_openvino_model
 ```
 
 Then teleop the robot. When the SLAM map looks complete and every
@@ -88,18 +85,18 @@ the camera FOV.
 
 ## Topic contract
 
-| Topic | Type | Direction |
-|---|---|---|
-| `/instruction/text` | `std_msgs/String` | operator → planner |
-| `/planner/pick_place_plan` | `geometry_msgs/PoseArray` | planner → executor |
-| `/nav/goals` | `geometry_msgs/PoseArray` | executor → nav coordinator |
-| `/nav/control_flag` | `std_msgs/String` (`"proceed"` / `"stop"`) | executor → nav coordinator |
-| `/nav/arrived_flag` | `std_msgs/String` (`"arrived"`) | nav coordinator → executor |
-| `/manipulation/pick` | `control_msgs/FollowJointTrajectory` action | executor → manipulation |
-| `/manipulation/place` | `control_msgs/FollowJointTrajectory` action | executor → manipulation |
-| `/detector/objects` | `vision_msgs/Detection3DArray` | detector → planner |
-| `/detector/snapshot` | `std_srvs/Trigger` service | operator → detector |
-| `/executor/start` | `std_srvs/Trigger` service | operator → executor |
+| Topic                      | Type                                        | Direction                  |
+| -------------------------- | ------------------------------------------- | -------------------------- |
+| `/instruction/text`        | `std_msgs/String`                           | operator → planner         |
+| `/planner/pick_place_plan` | `geometry_msgs/PoseArray`                   | planner → executor         |
+| `/nav/goals`               | `geometry_msgs/PoseArray`                   | executor → nav coordinator |
+| `/nav/control_flag`        | `std_msgs/String` (`"proceed"` / `"stop"`)  | executor → nav coordinator |
+| `/nav/arrived_flag`        | `std_msgs/String` (`"arrived"`)             | nav coordinator → executor |
+| `/manipulation/pick`       | `control_msgs/FollowJointTrajectory` action | executor → manipulation    |
+| `/manipulation/place`      | `control_msgs/FollowJointTrajectory` action | executor → manipulation    |
+| `/detector/objects`        | `vision_msgs/Detection3DArray`              | detector → planner         |
+| `/detector/snapshot`       | `std_srvs/Trigger` service                  | operator → detector        |
+| `/executor/start`          | `std_srvs/Trigger` service                  | operator → executor        |
 
 The nav coordinator stops Nav2 when the base is within 1 m of each goal
 and publishes `"arrived"`. Tune that distance by editing
