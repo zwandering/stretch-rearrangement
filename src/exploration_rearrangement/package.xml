@@ -4,15 +4,15 @@
   <name>exploration_rearrangement</name>
   <version>0.1.0</version>
   <description>
-    Autonomous Exploration-Driven Object Rearrangement for the Hello Robot Stretch 3.
-    Frontier-based exploration, RGB-D object detection, region-aware task planning
-    (greedy baseline + Gemini VLM), and Nav2 + Stretch manipulation execution.
+    Object Rearrangement on a Hello Robot Stretch 3. Operator builds a map and
+    snapshots object positions offline, then a Gemini-based VLM planner turns
+    natural-language instructions into pick/place sequences executed via
+    stretch_nav2 + Stretch manipulation.
   </description>
   <maintainer email="haokunz@andrew.cmu.edu">Haokun Zhu</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>
-  <depend>nav2_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
@@ -26,8 +26,7 @@
   <depend>image_transport</depend>
   <depend>control_msgs</depend>
   <depend>trajectory_msgs</depend>
-  <depend>slam_toolbox</depend>
-  <depend>nav2_bringup</depend>
+  <exec_depend>stretch_nav2</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -51,6 +51,7 @@ class TaskPlannerNode(Node):
         self.declare_parameter('min_detections_before_plan', 3)
         self.declare_parameter('instruction_topic', '/instruction/text')
         self.declare_parameter('place_anchor_z', 0.0)
+        self.declare_parameter('objects_snapshot_yaml', '')
 
         self.map_frame: str = self.get_parameter('map_frame').value
         self.base_frame: str = self.get_parameter('base_frame').value
@@ -73,6 +74,9 @@ class TaskPlannerNode(Node):
         )
 
         self.latest_detections: Dict[str, Tuple[float, float, float, float]] = {}
+        self._seed_detections_from_snapshot(
+            self.get_parameter('objects_snapshot_yaml').value,
+        )
         self.latest_map: Optional[OccupancyGrid] = None
 
         self.tf_buffer = Buffer()
@@ -137,6 +141,36 @@ class TaskPlannerNode(Node):
             ))
             out[entry['name']] = RegionInfo(entry['name'], poly, anchor)
         return out
+
+    def _seed_detections_from_snapshot(self, path: str) -> None:
+        if not path:
+            return
+        p = Path(path)
+        if not p.exists():
+            self.get_logger().warn(
+                f'objects_snapshot_yaml={p} does not exist; skipping seed.'
+            )
+            return
+        try:
+            with open(p, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            self.get_logger().warn(f'failed to read snapshot {p}: {e}')
+            return
+        objs = cfg.get('objects', {}) or {}
+        for label, entry in objs.items():
+            try:
+                self.latest_detections[str(label)] = (
+                    float(entry['x']),
+                    float(entry['y']),
+                    float(entry.get('z', 0.0)),
+                    float(entry.get('conf', 0.0)),
+                )
+            except (KeyError, TypeError, ValueError) as e:
+                self.get_logger().warn(f'snapshot entry {label!r} bad ({e}); skipping.')
+        self.get_logger().info(
+            f'Seeded {len(self.latest_detections)} object(s) from snapshot {p}.'
+        )
 
     # --- subscriptions ---------------------------------------------------
 

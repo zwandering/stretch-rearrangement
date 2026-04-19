@@ -1,129 +1,113 @@
-# Stretch 3 — Autonomous Exploration-Driven Object Rearrangement
+# Stretch 3 — Object Rearrangement
 
-Implementation of the 16-762 team project: the Stretch 3 mobile manipulator
-explores an unknown indoor environment, builds a 2-D map, detects three target
-objects, partitions the map into semantic regions (A/B/C/D) and rearranges each
-object into its goal region.
+16-762 team project. The operator pre-builds a map and snapshots object
+positions, manually annotates regions, then issues natural-language
+rearrangement instructions. A Gemini-based VLM planner turns each
+instruction into a pick/place sequence; the upstream `NavigationModule`
+coordinator drives the Stretch with `stretch_nav2`, and the manipulation
+node executes pick/place at each handoff.
 
 ## Architecture
 
 ```
-+-------------------+   +-----------------+   +------------------+
-|  exploration_node |   | object_detector |   |  region_manager  |
-|  (frontier → Nav2)|   | (HSV + depth)   |   | (polygons, place)|
-+---------+---------+   +---------+-------+   +---------+--------+
-          │                       │                     │
-          ▼                       ▼                     ▼
-                 +--------------------------------+
-                 |        task_executor_node      |
-                 |  (state machine orchestrator)  |
-                 +---------+--------------+-------+
-                           │              │
-               +-----------▼--+      +----▼-----------+
-               | task_planner |      |  manipulation  |
-               | greedy / VLM |      |  (pick/place)  |
-               +--------------+      +----------------+
+/instruction/text ─► task_planner_node ─► /planner/pick_place_plan
+                       │ (VLM)                  (PoseArray of pick0,
+                       │                         place0, pick1, place1, …)
+                       ▼
+                    task_executor_node ──► /nav/goals + /nav/control_flag
+                       │                         │
+                       │                         ▼
+                       │                   navigation_node ──► stretch_nav2 (Nav2 + AMCL)
+                       │                         │
+                       │  /nav/arrived_flag ◄────┘  (within 1 m of goal)
+                       ▼
+                    /manipulation/pick or /manipulation/place
 ```
+
+## Three-stage workflow
+
+### Stage 1 — Mapping + object snapshot (one-time, offline)
+
+```bash
+ros2 launch stretch_core stretch_driver.launch.py
+ros2 launch exploration_rearrangement mapping.launch.py \
+    objects_snapshot:=$HOME/maps/myroom_objects.yaml
+# Teleop drives the robot until every target object has been seen
+# at least once and the SLAM map looks complete.
+ros2 service call /detector/snapshot std_srvs/srv/Trigger
+ros2 run nav2_map_server map_saver_cli -f $HOME/maps/myroom
+```
+
+Outputs:
+- `myroom.{pgm,yaml}` — saved occupancy map.
+- `myroom_objects.yaml` — `{label: {x, y, z, conf}}` of every object the
+  detector latched onto in the `map` frame.
+
+### Stage 2 — Region annotation (manual)
+
+Edit `src/exploration_rearrangement/config/regions.yaml`. Each entry is
+a CCW polygon (vertices in `map` frame) plus a `place_anchor: [x, y, yaw]`
+that the planner uses as the place pose. Cross-check vertex coordinates
+by opening the saved map in RViz with `map_server` and using *Publish
+Point* to read off `(x, y)` for each corner.
+
+### Stage 3 — Run
+
+```bash
+ros2 launch stretch_core stretch_driver.launch.py
+ros2 launch exploration_rearrangement bringup.launch.py \
+    map:=$HOME/maps/myroom.yaml \
+    objects_snapshot:=$HOME/maps/myroom_objects.yaml
+# In RViz: click "2D Pose Estimate" to localize.
+ros2 topic pub --once /instruction/text std_msgs/msg/String \
+    '{data: "put the blue bottle in region C"}'
+ros2 service call /executor/start std_srvs/srv/Trigger
+```
+
+The detector keeps running during stage 3, so any object that's been
+moved between snapshot and execution gets corrected when it re-enters
+the camera FOV.
+
+## Topic contract
+
+| Topic | Type | Direction |
+|---|---|---|
+| `/instruction/text` | `std_msgs/String` | operator → planner |
+| `/planner/pick_place_plan` | `geometry_msgs/PoseArray` | planner → executor |
+| `/nav/goals` | `geometry_msgs/PoseArray` | executor → nav coordinator |
+| `/nav/control_flag` | `std_msgs/String` (`"proceed"` / `"stop"`) | executor → nav coordinator |
+| `/nav/arrived_flag` | `std_msgs/String` (`"arrived"`) | nav coordinator → executor |
+| `/manipulation/pick` | `control_msgs/FollowJointTrajectory` action | executor → manipulation |
+| `/manipulation/place` | `control_msgs/FollowJointTrajectory` action | executor → manipulation |
+| `/detector/objects` | `vision_msgs/Detection3DArray` | detector → planner |
+| `/detector/snapshot` | `std_srvs/Trigger` service | operator → detector |
+| `/executor/start` | `std_srvs/Trigger` service | operator → executor |
+
+The nav coordinator stops Nav2 when the base is within 1 m of each goal
+and publishes `"arrived"`. Tune that distance by editing
+`STOP_DISTANCE_M` at the top of `navigation_node.py`.
 
 ## Building
 
 ```bash
 cd stretch_rearrangement_ws
-colcon build --symlink-install
+colcon build --symlink-install --packages-select exploration_rearrangement
 source install/setup.bash
 ```
 
 Python deps (install in the same env that runs ROS 2):
 
 ```bash
-pip install openai numpy opencv-python pyyaml
+pip install openai>=1.30.0 ultralytics>=8.3.0 numpy opencv-python pyyaml
 ```
 
-## Running
+External ROS 2 packages: `stretch_nav2`, `nav2_bringup`, `nav2_map_server`
+(install via `apt install ros-${ROS_DISTRO}-...`).
 
-### 1. Driver (Hello Robot)
+## Credits
 
-```bash
-ros2 launch stretch_core stretch_driver.launch.py
-```
-
-### 2. Full system (SLAM + Nav2 + our nodes + RViz)
-
-Greedy planner (default):
-
-```bash
-ros2 launch exploration_rearrangement bringup.launch.py
-```
-
-VLM planner (Gemini via OpenAI SDK):
-
-```bash
-export GEMINI_API_KEY=your_key_here
-ros2 launch exploration_rearrangement bringup.launch.py \
-  planner_backend:=vlm
-```
-
-### 3. Kick off the task
-
-```bash
-ros2 service call /executor/start std_srvs/srv/Trigger
-```
-
-State transitions will stream to `/executor/state`. Metrics are written to
-`/tmp/rearrangement_metrics.json` when the run finishes; VLM prompt/response
-pairs are appended to `/tmp/rearrangement_vlm_log.jsonl`.
-
-## Switching planners
-
-- `planner_backend:=greedy` — deterministic nearest-neighbor baseline.
-- `planner_backend:=vlm` — sends structured scene + the detector's annotated
-  debug image to Gemini via `https://generativelanguage.googleapis.com/v1beta/openai/`
-  and parses a JSON plan. Falls back to greedy on API / JSON failure.
-
-Override the VLM model: `vlm_model:=gemini-2.5-pro` (or `gemini-2.0-flash`).
-
-## Config files
-
-| File | Purpose |
-|---|---|
-| `config/objects.yaml` | HSV ranges per target object |
-| `config/regions.yaml` | Map-frame polygons + place anchors per region |
-| `config/tasks.yaml`   | `label → goal_region` assignment |
-| `config/slam_params.yaml` | SLAM Toolbox async mapping |
-| `config/nav2_params.yaml` | Nav2 pipeline tuned for Stretch |
-
-## Evaluation artifacts
-
-`/tmp/rearrangement_metrics.json`
-```json
-{
-  "backend": "vlm",
-  "t_start": 1712345678.0,
-  "t_explore_done": 1712345770.3,
-  "first_detection": {"blue_bottle": 23.5, "red_box": 41.2, "yellow_cup": 55.9},
-  "pick_attempts": 3, "pick_successes": 3,
-  "place_attempts": 3, "place_successes": 3,
-  "task_results": [
-    {"object": "blue_bottle", "target": "C", "success": true, "ts": ...}
-  ],
-  "t_end": ..., "success": true
-}
-```
-
-These map directly to the four evaluation metrics in the proposal:
-task success rate, exploration efficiency, manipulation success rate,
-end-to-end completion time.
-
-## Ablation: greedy vs VLM
-
-Run the same physical scene twice:
-
-```bash
-ros2 launch exploration_rearrangement bringup.launch.py planner_backend:=greedy
-# save /tmp/rearrangement_metrics.json → metrics_greedy.json
-
-ros2 launch exploration_rearrangement bringup.launch.py planner_backend:=vlm
-# save /tmp/rearrangement_metrics.json → metrics_vlm.json
-```
-
-Compare `t_end - t_start`, pick/place success rates, and `task_results`.
+The `navigation_node.py` and the sample `maps/asangium.{yaml,pgm}` are
+vendored from
+[AuWeerachai/MobileManipulation](https://github.com/AuWeerachai/MobileManipulation),
+commit `e4b53e52`. See `src/exploration_rearrangement/docs/navigation_module.md`
+for the upstream protocol notes.

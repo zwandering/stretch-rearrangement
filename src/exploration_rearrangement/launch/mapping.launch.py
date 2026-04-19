@@ -1,7 +1,19 @@
-"""Exploration + mapping only. Useful for the first pass to build a map you can save."""
+"""Stage 1: offline mapping + object detection.
+
+Operator drives the robot manually while ``stretch_nav2 offline_mapping``
+builds a SLAM map and the YOLOE detector latches every target object's
+``map``-frame position. When the map is good and every object has been seen,
+the operator runs:
+
+    ros2 service call /detector/snapshot std_srvs/srv/Trigger
+    ros2 run nav2_map_server map_saver_cli -f <name>
+
+to persist a ``<name>.{pgm,yaml}`` and the matching object snapshot YAML.
+"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -10,52 +22,48 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     pkg = FindPackageShare('exploration_rearrangement')
-    slam_params = PathJoinSubstitution([pkg, 'config', 'slam_params.yaml'])
-    nav2_params = PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml'])
     objects_yaml = PathJoinSubstitution([pkg, 'config', 'objects.yaml'])
     rviz_cfg = PathJoinSubstitution([pkg, 'rviz', 'rearrangement.rviz'])
 
+    run_rviz = LaunchConfiguration('run_rviz')
+    yolo_model = LaunchConfiguration('yolo_model')
+    objects_snapshot = LaunchConfiguration('objects_snapshot')
+
     args = [
         DeclareLaunchArgument('run_rviz', default_value='true'),
+        DeclareLaunchArgument('yolo_model', default_value='yoloe-11s-seg.pt',
+                              description='YOLOE weights or exported .engine path'),
+        DeclareLaunchArgument(
+            'objects_snapshot',
+            default_value='/tmp/objects_snapshot.yaml',
+            description=('Path the detector writes its EMA-smoothed object '
+                         'positions to when /detector/snapshot is called '
+                         '(or on shutdown).'),
+        ),
     ]
 
-    slam = IncludeLaunchDescription(
+    offline_mapping = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
-            FindPackageShare('slam_toolbox'),
-            '/launch/online_async_launch.py',
+            FindPackageShare('stretch_nav2'),
+            '/launch/offline_mapping.launch.py',
         ]),
-        launch_arguments={
-            'slam_params_file': slam_params, 'use_sim_time': 'false',
-        }.items(),
-    )
-    nav2 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            FindPackageShare('nav2_bringup'),
-            '/launch/navigation_launch.py',
-        ]),
-        launch_arguments={
-            'use_sim_time': 'false', 'params_file': nav2_params, 'autostart': 'true',
-        }.items(),
     )
 
-    exploration = Node(
-        package='exploration_rearrangement', executable='exploration_node',
-        name='exploration_node', output='screen',
-        parameters=[{'enabled_on_start': True}],
-    )
     detector = Node(
         package='exploration_rearrangement', executable='object_detector_node',
         name='object_detector_node', output='screen',
-        parameters=[{'objects_yaml': objects_yaml}],
+        parameters=[{
+            'mode': 'robot',
+            'objects_yaml': objects_yaml,
+            'model_path': yolo_model,
+            'objects_snapshot_path': objects_snapshot,
+        }],
     )
-    head_scan = Node(
-        package='exploration_rearrangement', executable='head_scan_node',
-        name='head_scan_node', output='screen',
-        parameters=[{'enabled_on_start': True}],
-    )
+
     rviz = Node(
         package='rviz2', executable='rviz2', name='rviz2',
         arguments=['-d', rviz_cfg], output='log',
+        condition=IfCondition(run_rviz),
     )
 
-    return LaunchDescription(args + [slam, nav2, exploration, detector, head_scan, rviz])
+    return LaunchDescription(args + [offline_mapping, detector, rviz])

@@ -26,6 +26,7 @@ JSONL log for offline analysis.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -104,6 +105,7 @@ class ObjectDetectorNode(Node):
         self.declare_parameter('ema_alpha', 1.0)
         self.declare_parameter('publish_debug_image', True)
         self.declare_parameter('center_log_path', '')           # JSONL if non-empty
+        self.declare_parameter('objects_snapshot_path', '')     # YAML if non-empty
 
         self.mode = str(self.get_parameter('mode').value).lower()
         if self.mode not in ('robot', 'debug'):
@@ -133,6 +135,10 @@ class ObjectDetectorNode(Node):
         device = str(self.get_parameter('device').value) or None
         log_path = str(self.get_parameter('center_log_path').value)
         self.center_log: Optional[Path] = Path(log_path) if log_path else None
+        snap_path = str(self.get_parameter('objects_snapshot_path').value)
+        self.objects_snapshot_path: Optional[Path] = (
+            Path(snap_path) if snap_path else None
+        )
 
         # --- Object / prompt config ----------------------------------------
         objects_yaml = str(self.get_parameter('objects_yaml').value)
@@ -194,6 +200,7 @@ class ObjectDetectorNode(Node):
         self.debug_img_pub = self.create_publisher(Image, '/detector/debug_image', 2)
 
         self.create_service(Trigger, '/detector/clear', self._on_clear, callback_group=cb)
+        self.create_service(Trigger, '/detector/snapshot', self._on_snapshot, callback_group=cb)
         self.create_timer(1.0, self._publish_markers, callback_group=cb)
 
         self.get_logger().info(
@@ -217,6 +224,48 @@ class ObjectDetectorNode(Node):
         res.success = True
         res.message = 'cleared'
         return res
+
+    def _on_snapshot(self, req, res):
+        path = self.objects_snapshot_path
+        if path is None:
+            res.success = False
+            res.message = 'objects_snapshot_path parameter not set'
+            return res
+        try:
+            n = self._write_snapshot(path)
+        except OSError as e:
+            res.success = False
+            res.message = f'write failed: {e}'
+            return res
+        res.success = True
+        res.message = f'wrote {n} object(s) to {path}'
+        return res
+
+    def _write_snapshot(self, path: Path) -> int:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        objs = {}
+        for name, ps in self.objects.items():
+            objs[name] = {
+                'x': float(ps.pose.position.x),
+                'y': float(ps.pose.position.y),
+                'z': float(ps.pose.position.z),
+                'conf': float(self.last_confs.get(name, 0.0)),
+            }
+        payload = {'frame_id': self.output_frame, 'objects': objs}
+        stamp = _dt.datetime.now().isoformat(timespec='seconds')
+        with open(path, 'w') as f:
+            f.write(f'# detector snapshot @ {stamp}\n')
+            yaml.safe_dump(payload, f, sort_keys=True)
+        self.get_logger().info(f'snapshot: wrote {len(objs)} objects to {path}')
+        return len(objs)
+
+    def destroy_node(self):
+        if self.objects_snapshot_path is not None and self.objects:
+            try:
+                self._write_snapshot(self.objects_snapshot_path)
+            except Exception as e:
+                self.get_logger().warn(f'shutdown snapshot failed: {e}')
+        return super().destroy_node()
 
     def _on_rgbd(self, rgb: Image, depth: Image) -> None:
         if self.camera_info is None:
