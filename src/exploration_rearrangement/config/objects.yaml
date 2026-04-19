@@ -12,8 +12,8 @@ objects:
   - name: yellow cup
     prompts: ["yellow cup", "yellow mug"]
 
-  - name: green_cup
-    prompts: ["green cup", "green mug"]
+  - name: purple_cup
+    prompts: ["purple cup", "purple mug"]
 
-  - name: blue_cup
-    prompts: ["blue cup", "blue mug"]
+  - name: orange_cup
+    prompts: ["orange cup", "orange mug"]
