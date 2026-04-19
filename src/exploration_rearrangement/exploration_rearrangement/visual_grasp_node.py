@@ -11,7 +11,7 @@ from tf2_geometry_msgs import TransformStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from vision_msgs.msg import Detection3DArray
-import ik_ros_utils as ik
+from .manipulation import ik_ros_utils as ik
 import ikpy
 
 # Make sure to run:
@@ -198,7 +198,11 @@ class IKVisualGrasp(HelloNode):
         print("Fine detector activated — waiting for detections")
 
 
-if __name__ == '__main__':
+def main():
     node = IKVisualGrasp()
     node.main()
     node.new_thread.join()
+
+
+if __name__ == '__main__':
+    main()
