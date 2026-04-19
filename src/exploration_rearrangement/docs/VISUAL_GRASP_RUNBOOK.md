@@ -6,7 +6,7 @@ IK target-following + D405 fine detection → visually-guided pick.
   D405 RGB-D (gripper)
         │
         ▼
-  fine_object_detector_node          target_following.py
+  fine_object_detector_node          visual_grasp_node.py
         │                                    │
         │  /fine_detector/objects             │  subscribes
         │  (Detection3DArray, base_link)  ───►│
@@ -18,7 +18,7 @@ IK target-following + D405 fine detection → visually-guided pick.
 
   Loop:
     1. fine detector publishes object 3D pose in base_link
-    2. target_following reads it, computes IK waypoint (δ step)
+    2. visual_grasp_node reads it, computes IK waypoint (δ step)
     3. move_to_configuration → arm moves one increment
     4. repeat until gripper–object distance < δ
     5. pick(): close gripper → retract arm → deactivate detector
@@ -90,14 +90,14 @@ ros2 run exploration_rearrangement fine_object_detector_node --ros-args \
 
 ---
 
-## 3. Start target following (with pick)
+## 3. Start visual grasp node (with pick)
 
-`target_following.py` is a HelloNode script in the `manipulation/`
+`visual_grasp_node.py` is a HelloNode script in the `manipulation/`
 directory. It needs `ik_ros_utils` and `ikpy` on its Python path.
 
 ### 3a. Set the target object name
 
-Before running, edit `target_following.py` line 36 to set which object to
+Before running, edit `visual_grasp_node.py` line 48 to set which object to
 track. The name must match one of the classes in `config/objects.yaml`:
 
 ```python
@@ -107,10 +107,10 @@ self.target_object_name = 'white_bottle'   # or 'green_cup', 'blue_cup'
 ### 3b. Run
 
 ```bash
-# Terminal 2 — target following + pick
+# Terminal 2 — visual grasp (IK following + pick)
 source install/setup.bash
 cd ~/Homework/16-762/project/stretch_rearrangement_ws/src/exploration_rearrangement/exploration_rearrangement/manipulation
-python target_following.py
+python visual_grasp_node.py
 ```
 
 On launch it will:
@@ -178,7 +178,7 @@ ros2 topic pub --once /fine_detector/activate std_msgs/Bool "{data: false}"
 
 ## 5. Tunable parameters
 
-All tuned in `target_following.py` `__init__`:
+All tuned in `visual_grasp_node.py` `__init__`:
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
@@ -249,5 +249,5 @@ the gripper aims at the wrong spot.
 |----------|---------|
 | 0 | `ros2 launch stretch_core stretch_driver.launch.py` |
 | 1 | `ros2 run exploration_rearrangement fine_object_detector_node --ros-args -p mode:=robot -p model_path:=yoloe-11s-seg.pt -p objects_yaml:=...` |
-| 2 | `cd .../manipulation && python target_following.py` |
+| 2 | `cd .../manipulation && python visual_grasp_node.py` |
 | 3 (optional) | `ros2 run rqt_image_view rqt_image_view /fine_detector/debug_image` |
