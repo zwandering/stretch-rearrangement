@@ -12,6 +12,16 @@ published as a ``Detection3DArray`` on ``/fine_detector/objects`` — giving
 the manipulation node an accurate, constantly-refreshed pose for whichever
 object sits in the gripper's field of view.
 
+The node also subscribes to ``/fine_detector/target_object``
+(``std_msgs/String``). If set to a known class name, the published output
+is filtered down to just that class — detection still runs over every
+prompt, but the manipulation layer only ever sees the one object it
+asked for. Sending an empty string clears the filter (publish all);
+sending an unknown name is rejected with a warning and the previous
+target is kept. The valid name set is the ``objects:`` list in
+``config/objects.yaml`` (the same list that was baked into the exported
+YOLOE model at ``set_up_yolo_e`` time).
+
 This node is deliberately separate from ``object_detector_node``:
   * different camera (D405 on gripper, vs D435i on head),
   * different output frame (``base_link`` so manipulation uses the pose
@@ -38,7 +48,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 from vision_msgs.msg import (
     BoundingBox3D, BoundingBox3DArray,
@@ -126,6 +136,7 @@ class FineObjectDetectorNode(Node):
         self.declare_parameter('publish_debug_image', True)
 
         self.declare_parameter('activate_topic', '/fine_detector/activate')
+        self.declare_parameter('target_object_topic', '/fine_detector/target_object')
         self.declare_parameter('detections_topic', '/fine_detector/objects')
         self.declare_parameter('bboxes_topic', '/fine_detector/bboxes_3d')
         self.declare_parameter('bbox_markers_topic', '/fine_detector/bboxes_3d_markers')
@@ -179,6 +190,8 @@ class FineObjectDetectorNode(Node):
         self.orientations: Dict[str, Quaternion] = {}
         self.last_confs: Dict[str, float] = {}
         self._tf_warn_once = False
+        self.known_names = {o['name'] for o in self.object_defs}
+        self.target_name: Optional[str] = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -203,6 +216,10 @@ class FineObjectDetectorNode(Node):
         self.create_subscription(
             Bool, activate_topic, self._on_activate, 10, callback_group=cb,
         )
+        target_topic = str(self.get_parameter('target_object_topic').value)
+        self.create_subscription(
+            String, target_topic, self._on_target_object, 10, callback_group=cb,
+        )
 
         self.detections_pub = self.create_publisher(
             Detection3DArray, str(self.get_parameter('detections_topic').value), 10,
@@ -219,7 +236,8 @@ class FineObjectDetectorNode(Node):
 
         self.get_logger().info(
             f'fine_object_detector_node ready | mode={self.mode} '
-            f'rgb={rgb_topic} → {self.output_frame}, activate on {activate_topic}'
+            f'rgb={rgb_topic} → {self.output_frame}, activate on {activate_topic}, '
+            f'target on {target_topic}'
         )
 
     # --- callbacks --------------------------------------------------------
@@ -241,6 +259,24 @@ class FineObjectDetectorNode(Node):
         elif not want and self.active:
             self.active = False
             self.get_logger().info('fine detector: deactivated')
+
+    def _on_target_object(self, msg: String) -> None:
+        name = (msg.data or '').strip()
+        if not name:
+            if self.target_name is not None:
+                self.get_logger().info('fine detector: target filter cleared')
+            self.target_name = None
+            return
+        if name not in self.known_names:
+            self.get_logger().warn(
+                f"fine detector: target '{name}' not in exported-model class list "
+                f"{sorted(self.known_names)} — keeping previous target "
+                f"{self.target_name!r}"
+            )
+            return
+        if name != self.target_name:
+            self.get_logger().info(f"fine detector: target set to '{name}'")
+        self.target_name = name
 
     def _on_rgbd(self, rgb: Image, depth: Image) -> None:
         if not self.active or self.camera_info is None:
@@ -350,6 +386,8 @@ class FineObjectDetectorNode(Node):
         arr.header.stamp = stamp
         arr.header.frame_id = self.output_frame
         for name, xyz in self.smoothed.items():
+            if self.target_name is not None and name != self.target_name:
+                continue
             det = Detection3D()
             det.header = arr.header
             det.id = name
@@ -379,6 +417,8 @@ class FineObjectDetectorNode(Node):
         markers.markers.append(clear)
         marker_id = 0
         for name, xyz in self.smoothed.items():
+            if self.target_name is not None and name != self.target_name:
+                continue
             size = self.smoothed_sizes.get(name)
             if size is None:
                 continue
