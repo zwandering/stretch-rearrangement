@@ -153,7 +153,7 @@
 | `camera_frame` | string | `camera_color_optical_frame` | Camera optical frame |
 | `map_frame` | string | `map` | Map coordinate frame |
 | `merge_dist_m` | float | `0.3` | Merge distance for new vs. existing detections (m) |
-| `ema_alpha` | float | `0.3` | EMA smoothing factor (higher biases toward newer values) |
+| `ema_alpha` | float | `1.0` | EMA smoothing factor (higher biases toward newer values, 1.0 = smoothing off) |
 | `publish_debug_image` | bool | `True` | Whether to publish annotated debug image |
 
 #### Subscriptions

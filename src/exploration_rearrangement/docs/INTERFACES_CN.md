@@ -153,7 +153,7 @@
 | `camera_frame` | string | `camera_color_optical_frame` | 相机光学坐标系 |
 | `map_frame` | string | `map` | 地图坐标系 |
 | `merge_dist_m` | float | `0.3` | 新检测与已有位置的合并距离 (m) |
-| `ema_alpha` | float | `0.3` | EMA 平滑系数 (越大越偏新值) |
+| `ema_alpha` | float | `1.0` | EMA 平滑系数 (越大越偏新值, 1.0 = 关闭平滑) |
 | `publish_debug_image` | bool | `True` | 是否发布调试图像 |
 
 #### 订阅

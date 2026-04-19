@@ -35,6 +35,8 @@ def generate_launch_description():
     conf = LaunchConfiguration('conf_threshold')
     center_log = LaunchConfiguration('center_log_path')
     start_rs = LaunchConfiguration('start_realsense')
+    run_rviz = LaunchConfiguration('run_rviz')
+    enable_pointcloud = LaunchConfiguration('enable_pointcloud')
 
     args = [
         DeclareLaunchArgument('model_path', default_value='yoloe-11s-seg.pt'),
@@ -42,6 +44,10 @@ def generate_launch_description():
         DeclareLaunchArgument('center_log_path', default_value=''),
         DeclareLaunchArgument('start_realsense', default_value='false',
                               description='If true, also launch realsense2_camera.'),
+        DeclareLaunchArgument('enable_pointcloud', default_value='true',
+                              description='Publish RGB pointcloud from realsense2_camera.'),
+        DeclareLaunchArgument('run_rviz', default_value='false',
+                              description='Open RViz with the detector_debug.rviz config.'),
     ]
 
     realsense = GroupAction(
@@ -55,7 +61,7 @@ def generate_launch_description():
                 'enable_color': 'true',
                 'enable_depth': 'true',
                 'align_depth.enable': 'true',
-                'pointcloud.enable': 'false',
+                'pointcloud.enable': enable_pointcloud,
             }.items(),
         )],
     )
@@ -75,4 +81,11 @@ def generate_launch_description():
         }],
     )
 
-    return LaunchDescription(args + [realsense, detector])
+    rviz_cfg = PathJoinSubstitution([pkg, 'rviz', 'detector_debug.rviz'])
+    rviz = Node(
+        condition=IfCondition(run_rviz),
+        package='rviz2', executable='rviz2', name='rviz2',
+        arguments=['-d', rviz_cfg], output='log',
+    )
+
+    return LaunchDescription(args + [realsense, detector, rviz])

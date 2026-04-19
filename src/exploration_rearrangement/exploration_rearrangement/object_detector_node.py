@@ -16,7 +16,7 @@ Uses the smallest YOLOE variant (``yoloe-11s-seg.pt``) by default. If
 prompts were baked in at export time (see ``set_up_yolo_e.py``); otherwise we
 load the ``.pt`` weights and call ``set_classes`` at startup.
 
-Tracking is Ultralytics' built-in tracker (BYTETrack) via
+Tracking is Ultralytics' built-in tracker (BoT-SORT) via
 ``model.track(..., persist=True)``. Each frame we pick the top-confidence
 detection for every named object and update an EMA-smoothed 3D pose; the
 running center record (per-object 2D pixel + 3D world + track id) is
@@ -35,7 +35,7 @@ import numpy as np
 import rclpy
 import yaml
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseArray, PoseStamped, Quaternion
+from geometry_msgs.msg import Point, PoseArray, PoseStamped, Quaternion, Vector3
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -45,11 +45,16 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import ColorRGBA
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
-from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
+from vision_msgs.msg import (
+    BoundingBox3D, BoundingBox3DArray,
+    Detection3D, Detection3DArray, ObjectHypothesisWithPose,
+)
 from visualization_msgs.msg import Marker, MarkerArray
 
-from .utils.depth_projection import pixel_to_camera
-from .utils.transform_utils import transform_point_to_frame
+from .utils.depth_projection import (
+    aabb_iou_3d, estimate_bbox_3d, estimate_bbox_3d_from_mask, pixel_to_camera,
+)
+from .utils.transform_utils import lookup_pose, transform_point_to_frame
 
 
 # ---------------------------------------------------------------------------
@@ -90,12 +95,13 @@ class ObjectDetectorNode(Node):
         self.declare_parameter('objects_yaml', '')
         self.declare_parameter('conf_threshold', 0.25)
         self.declare_parameter('iou_threshold', 0.45)
-        self.declare_parameter('tracker', 'bytetrack.yaml')
+        self.declare_parameter('tracker', 'botsort.yaml')
         self.declare_parameter('imgsz', 640)
         self.declare_parameter('device', '')                    # '' → auto
         self.declare_parameter('merge_dist_m', 0.3)
-        self.declare_parameter('dedup_dist_m', 0.25)
-        self.declare_parameter('ema_alpha', 0.3)
+        self.declare_parameter('dedup_iou_threshold', 0.3)
+        self.declare_parameter('bbox_line_width', 0.005)
+        self.declare_parameter('ema_alpha', 1.0)
         self.declare_parameter('publish_debug_image', True)
         self.declare_parameter('center_log_path', '')           # JSONL if non-empty
 
@@ -116,7 +122,8 @@ class ObjectDetectorNode(Node):
         self.camera_frame = str(self.get_parameter('camera_frame').value)
         self.output_frame = str(self.get_parameter('output_frame').value)
         self.merge_dist = float(self.get_parameter('merge_dist_m').value)
-        self.dedup_dist = float(self.get_parameter('dedup_dist_m').value)
+        self.dedup_iou = float(self.get_parameter('dedup_iou_threshold').value)
+        self.bbox_line_width = float(self.get_parameter('bbox_line_width').value)
         self.ema = float(self.get_parameter('ema_alpha').value)
         self.pub_debug = bool(self.get_parameter('publish_debug_image').value)
         self.conf_th = float(self.get_parameter('conf_threshold').value)
@@ -152,6 +159,8 @@ class ObjectDetectorNode(Node):
         self.last_pixel_centers: Dict[str, Tuple[int, int]] = {}
         self.last_track_ids: Dict[str, int] = {}
         self.last_confs: Dict[str, float] = {}
+        self.object_sizes: Dict[str, Tuple[float, float, float]] = {}  # EMA'd camera-frame extent
+        self.object_orientations: Dict[str, Quaternion] = {}           # camera→output rotation
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -176,6 +185,12 @@ class ObjectDetectorNode(Node):
         self.objects_pub = self.create_publisher(
             Detection3DArray, '/detector/objects', 10,
         )
+        self.bboxes_pub = self.create_publisher(
+            BoundingBox3DArray, '/detector/bboxes_3d', 10,
+        )
+        self.bbox_markers_pub = self.create_publisher(
+            MarkerArray, '/detector/bboxes_3d_markers', 10,
+        )
         self.debug_img_pub = self.create_publisher(Image, '/detector/debug_image', 2)
 
         self.create_service(Trigger, '/detector/clear', self._on_clear, callback_group=cb)
@@ -197,6 +212,8 @@ class ObjectDetectorNode(Node):
         self.objects.clear()
         self.last_pixel_centers.clear()
         self.last_track_ids.clear()
+        self.object_sizes.clear()
+        self.object_orientations.clear()
         res.success = True
         res.message = 'cleared'
         return res
@@ -237,23 +254,53 @@ class ObjectDetectorNode(Node):
         cx0 = self.camera_info.k[2]
         cy0 = self.camera_info.k[5]
 
-        # Project every per-class top detection to 3D (camera frame) first.
-        candidates: List[Tuple[float, str, _Det, Tuple[float, float, float]]] = []
+        # Compute a 3D bbox per candidate up front and use its center as
+        # the object position. The mask-estimator already percentile-clips
+        # depth + per-axis across the full silhouette, so the center is far
+        # more stable than a single-pixel back-projection at the (jittery)
+        # 2D bbox center — no more z-axis flicker. pixel_to_camera stays
+        # as a fallback only for the rare case where bbox estimation fails.
+        Candidate = Tuple[
+            float, str, _Det, Tuple[float, float, float],
+            Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]],
+        ]
+        candidates: List[Candidate] = []
         for name, d in best_per_name.items():
             u, v = d.center
-            cam_xyz = pixel_to_camera(depth_img, u, v, fx, fy, cx0, cy0)
-            if cam_xyz is None:
-                continue
-            candidates.append((float(d.conf), name, d, cam_xyz))
+            if d.mask is not None:
+                bbox_xyz = estimate_bbox_3d_from_mask(
+                    depth_img, d.mask, fx, fy, cx0, cy0,
+                )
+            else:
+                bbox_xyz = estimate_bbox_3d(
+                    depth_img, d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3],
+                    fx, fy, cx0, cy0,
+                )
+            if bbox_xyz is not None:
+                cam_xyz = bbox_xyz[0]
+            else:
+                cam_xyz = pixel_to_camera(depth_img, u, v, fx, fy, cx0, cy0)
+                if cam_xyz is None:
+                    continue
+            candidates.append((float(d.conf), name, d, cam_xyz, bbox_xyz))
 
-        # Simple 3D dedup — if two different-class candidates land within
-        # dedup_dist_m of each other in the camera frame (same physical
-        # object firing multiple prompts), keep only the higher-confidence one.
-        kept = _dedup_candidates_3d(
-            candidates, self.dedup_dist, logger=self.get_logger(),
+        # 3D bbox-IoU dedup — different prompts firing on the same physical
+        # object give overlapping AABBs; keep only the highest-conf one.
+        kept = _dedup_candidates_iou_3d(
+            candidates, self.dedup_iou, logger=self.get_logger(),
         )
 
-        for _, name, d, cam_xyz in kept:
+        # Camera→output rotation is the same for every detection this frame.
+        cam_to_out_q: Optional[Quaternion] = None
+        if self.output_frame != self.camera_frame:
+            tf = lookup_pose(
+                self.tf_buffer, self.output_frame, self.camera_frame,
+                timeout_sec=0.1,
+            )
+            if tf is not None:
+                cam_to_out_q = tf.transform.rotation
+
+        for _, name, d, cam_xyz, bbox_xyz in kept:
             u, v = d.center
             if self.output_frame == self.camera_frame:
                 world_xyz = cam_xyz
@@ -265,6 +312,8 @@ class ObjectDetectorNode(Node):
                 if world_xyz is None:
                     continue
             self._update_object(name, world_xyz, rgb.header.stamp)
+            if bbox_xyz is not None:
+                self._update_bbox(name, bbox_xyz[1], cam_to_out_q)
             self.last_pixel_centers[name] = (u, v)
             self.last_confs[name] = float(d.conf)
             if d.track_id is not None:
@@ -280,6 +329,8 @@ class ObjectDetectorNode(Node):
 
         # /detector/objects — labeled Detection3DArray, one entry per class.
         self._publish_object_detections(rgb.header.stamp)
+        # /detector/bboxes_3d + /detector/bboxes_3d_markers
+        self._publish_bboxes_3d(rgb.header.stamp)
 
         if self.center_log is not None and self.objects:
             self._log_centers(rgb.header.stamp)
@@ -293,6 +344,27 @@ class ObjectDetectorNode(Node):
     # ------------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------------
+
+    def _update_bbox(
+        self,
+        name: str,
+        cam_size: Tuple[float, float, float],
+        cam_to_out_q: Optional[Quaternion],
+    ) -> None:
+        prev = self.object_sizes.get(name)
+        if prev is None:
+            self.object_sizes[name] = (
+                float(cam_size[0]), float(cam_size[1]), float(cam_size[2]),
+            )
+        else:
+            a = self.ema
+            self.object_sizes[name] = (
+                (1.0 - a) * prev[0] + a * float(cam_size[0]),
+                (1.0 - a) * prev[1] + a * float(cam_size[1]),
+                (1.0 - a) * prev[2] + a * float(cam_size[2]),
+            )
+        if cam_to_out_q is not None:
+            self.object_orientations[name] = cam_to_out_q
 
     def _update_object(self, name: str, xyz, stamp) -> None:
         ps = PoseStamped()
@@ -363,9 +435,52 @@ class ObjectDetectorNode(Node):
             hyp.hypothesis.score = float(self.last_confs.get(name, 0.0))
             hyp.pose.pose = ps.pose
             det.results.append(hyp)
-            det.bbox.center = ps.pose
+            det.bbox.center.position = ps.pose.position
+            det.bbox.center.orientation = self.object_orientations.get(
+                name, ps.pose.orientation,
+            )
+            size = self.object_sizes.get(name)
+            if size is not None:
+                det.bbox.size = Vector3(x=size[0], y=size[1], z=size[2])
             arr.detections.append(det)
         self.objects_pub.publish(arr)
+
+    def _publish_bboxes_3d(self, stamp) -> None:
+        arr = BoundingBox3DArray()
+        arr.header.stamp = stamp
+        arr.header.frame_id = self.output_frame
+        markers = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+        marker_id = 0
+        for name, ps in self.objects.items():
+            size = self.object_sizes.get(name)
+            if size is None:
+                continue
+            box = BoundingBox3D()
+            box.center.position = ps.pose.position
+            box.center.orientation = self.object_orientations.get(
+                name, ps.pose.orientation,
+            )
+            box.size = Vector3(x=size[0], y=size[1], z=size[2])
+            arr.boxes.append(box)
+
+            m = Marker()
+            m.header.frame_id = self.output_frame
+            m.header.stamp = stamp
+            m.ns = f'{name}_bbox3d'
+            m.id = marker_id
+            marker_id += 1
+            m.type = Marker.LINE_LIST
+            m.action = Marker.ADD
+            m.pose = box.center
+            m.scale.x = self.bbox_line_width
+            m.color = _color_for(name)
+            m.points = _bbox3d_line_list_points(size)
+            markers.markers.append(m)
+        self.bboxes_pub.publish(arr)
+        self.bbox_markers_pub.publish(markers)
 
     def _log_centers(self, stamp) -> None:
         record = {
@@ -391,15 +506,16 @@ class ObjectDetectorNode(Node):
 # ---------------------------------------------------------------------------
 
 class _Det:
-    __slots__ = ('name', 'prompt', 'conf', 'center', 'bbox', 'track_id')
+    __slots__ = ('name', 'prompt', 'conf', 'center', 'bbox', 'track_id', 'mask')
 
-    def __init__(self, name, prompt, conf, center, bbox, track_id):
+    def __init__(self, name, prompt, conf, center, bbox, track_id, mask=None):
         self.name = name
         self.prompt = prompt
         self.conf = conf
         self.center = center     # (u, v) pixel
         self.bbox = bbox         # (x, y, w, h)
         self.track_id = track_id
+        self.mask = mask         # Optional[np.ndarray], bool silhouette
 
 
 def _parse_yolo_tracks(
@@ -416,12 +532,41 @@ def _parse_yolo_tracks(
     clss = r.boxes.cls.cpu().numpy().astype(int)
     ids_t = r.boxes.id
     ids = ids_t.cpu().numpy().astype(int) if ids_t is not None else [None] * len(clss)
-    for (x1, y1, x2, y2), conf, cls, tid in zip(xyxy, confs, clss, ids):
+    # Ultralytics gives two mask formats per Result:
+    #   - ``masks.data``   : (n, mh, mw) at **letterboxed model-input** size
+    #   - ``masks.xy``     : list of (k, 2) polygons in **original image** coords
+    # We want masks aligned to the original image (so bboxes + debug overlay +
+    # 3D back-projection all share the same pixel grid). Resizing ``.data`` is
+    # wrong because it stretches letterbox padding. Rasterize ``.xy`` polygons
+    # directly onto an ``orig_shape``-sized canvas.
+    masks_xy = None
+    orig_h = orig_w = None
+    m_attr = getattr(r, 'masks', None)
+    if m_attr is not None:
+        xy = getattr(m_attr, 'xy', None)
+        if xy is not None and len(xy) > 0:
+            masks_xy = xy
+            orig_shape = getattr(r, 'orig_shape', None)
+            if orig_shape is not None:
+                orig_h, orig_w = int(orig_shape[0]), int(orig_shape[1])
+    for i, ((x1, y1, x2, y2), conf, cls, tid) in enumerate(
+        zip(xyxy, confs, clss, ids)
+    ):
         name = prompt_to_name.get(int(cls))
         if name is None:
             continue
         cu = int(0.5 * (x1 + x2))
         cv = int(0.5 * (y1 + y2))
+        mask_i = None
+        if (
+            masks_xy is not None and i < len(masks_xy)
+            and orig_h is not None and orig_w is not None
+        ):
+            poly = masks_xy[i]
+            if poly is not None and len(poly) >= 3:
+                raster = np.zeros((orig_h, orig_w), dtype=np.uint8)
+                cv2.fillPoly(raster, [np.asarray(poly, dtype=np.int32)], 1)
+                mask_i = raster.astype(bool)
         out.append(_Det(
             name=name,
             prompt=prompts[int(cls)] if int(cls) < len(prompts) else str(cls),
@@ -429,47 +574,104 @@ def _parse_yolo_tracks(
             center=(cu, cv),
             bbox=(int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
             track_id=int(tid) if tid is not None else None,
+            mask=mask_i,
         ))
     return out
 
 
-def _dedup_candidates_3d(
-    candidates: List[Tuple[float, str, "_Det", Tuple[float, float, float]]],
-    dedup_dist: float,
+_BBox3D = Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]
+_Candidate = Tuple[float, str, "_Det", Tuple[float, float, float], _BBox3D]
+
+
+def _dedup_candidates_iou_3d(
+    candidates: List[_Candidate],
+    iou_threshold: float,
     logger=None,
-) -> List[Tuple[float, str, "_Det", Tuple[float, float, float]]]:
-    """Greedy 3D NMS across class labels: keep highest-conf detection, drop
-    any subsequent detection within dedup_dist of an already-kept one."""
-    if dedup_dist <= 0.0 or len(candidates) <= 1:
+) -> List[_Candidate]:
+    """Greedy 3D NMS across class labels via AABB IoU.
+
+    Candidates are processed in descending confidence order. A candidate is
+    dropped when its 3D bbox overlaps a previously-kept candidate's bbox with
+    IoU > ``iou_threshold`` (same physical object fired multiple prompts).
+    Candidates with no computable bbox fall through unchanged — we have no
+    geometry to compare, so keep them and let downstream smoothing handle it.
+    """
+    if iou_threshold >= 1.0 or len(candidates) <= 1:
         return list(candidates)
     ordered = sorted(candidates, key=lambda t: -t[0])
-    kept: List[Tuple[float, str, "_Det", Tuple[float, float, float]]] = []
-    thresh_sq = dedup_dist * dedup_dist
+    kept: List[_Candidate] = []
     for entry in ordered:
-        _, name, _, xyz = entry
-        too_close_to = None
+        conf, name, _, _, bbox = entry
+        if bbox is None:
+            kept.append(entry)
+            continue
+        overlap_k: Optional[_Candidate] = None
+        overlap_iou = 0.0
         for k in kept:
-            kxyz = k[3]
-            dsq = (
-                (xyz[0] - kxyz[0]) ** 2
-                + (xyz[1] - kxyz[1]) ** 2
-                + (xyz[2] - kxyz[2]) ** 2
-            )
-            if dsq < thresh_sq:
-                too_close_to = k
+            kbbox = k[4]
+            if kbbox is None:
+                continue
+            iou = aabb_iou_3d(bbox[0], bbox[1], kbbox[0], kbbox[1])
+            if iou > iou_threshold:
+                overlap_k = k
+                overlap_iou = iou
                 break
-        if too_close_to is None:
+        if overlap_k is None:
             kept.append(entry)
         elif logger is not None:
             logger.debug(
-                f'dedup: dropping {name} (conf={entry[0]:.2f}) — within '
-                f'{dedup_dist}m of {too_close_to[1]} (conf={too_close_to[0]:.2f})'
+                f'dedup: dropping {name} (conf={conf:.2f}) — IoU={overlap_iou:.2f} '
+                f'with {overlap_k[1]} (conf={overlap_k[0]:.2f})'
             )
     return kept
 
 
+def _bbox3d_line_list_points(
+    size: Tuple[float, float, float],
+) -> List[Point]:
+    """24 Points forming the 12 edges of an AABB of ``size``, centered at the
+    origin. Use as ``Marker.LINE_LIST``'s ``points`` with the marker's pose
+    set to the bbox center/orientation — the line list becomes an oriented
+    wireframe cuboid in world frame.
+    """
+    hx = 0.5 * float(size[0])
+    hy = 0.5 * float(size[1])
+    hz = 0.5 * float(size[2])
+    c = [
+        (-hx, -hy, -hz), ( hx, -hy, -hz), ( hx,  hy, -hz), (-hx,  hy, -hz),
+        (-hx, -hy,  hz), ( hx, -hy,  hz), ( hx,  hy,  hz), (-hx,  hy,  hz),
+    ]
+    edges = (
+        (0, 1), (1, 2), (2, 3), (3, 0),  # bottom rectangle
+        (4, 5), (5, 6), (6, 7), (7, 4),  # top rectangle
+        (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
+    )
+    pts: List[Point] = []
+    for i, j in edges:
+        ax, ay, az = c[i]
+        bx, by, bz = c[j]
+        pts.append(Point(x=ax, y=ay, z=az))
+        pts.append(Point(x=bx, y=by, z=bz))
+    return pts
+
+
 def _annotate(bgr: np.ndarray, dets: List[_Det]) -> np.ndarray:
     out = bgr.copy()
+    H, W = out.shape[:2]
+    # First pass: alpha-blend each per-class silhouette under the bboxes.
+    # Masks are already rasterized at original image resolution in
+    # ``_parse_yolo_tracks`` (from ``masks.xy`` polygons), so no resize here.
+    for d in dets:
+        if d.mask is None:
+            continue
+        m = d.mask
+        if m.shape != (H, W) or not m.any():
+            continue
+        b, g, r = _bgr_for(d.name)
+        color = np.array([b, g, r], dtype=np.float32)
+        region = out[m].astype(np.float32)
+        out[m] = (0.55 * region + 0.45 * color).astype(np.uint8)
+    # Second pass: bboxes + text so crisp edges aren't washed out by the blend.
     for d in dets:
         x, y, w, h = d.bbox
         cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -494,15 +696,60 @@ def _color_for(name: str) -> ColorRGBA:
     return ColorRGBA(r=r, g=g, b=b, a=1.0)
 
 
+def _bgr_for(name: str) -> Tuple[int, int, int]:
+    r, g, b = _MARKER_PALETTE.get(name, (0.7, 0.7, 0.7))
+    return (int(b * 255), int(g * 255), int(r * 255))
+
+
+def _find_objects_yaml() -> Optional[Path]:
+    """Locate the package's installed ``config/objects.yaml``.
+
+    Needed as an auto-fallback because the same YAML is what
+    ``set_up_yolo_e.py`` bakes into exported artifacts — if the detector
+    node runs with a shorter built-in default it'd produce mismatched
+    ``prompt_to_name`` indices (e.g. a class-2 "green cup" from the
+    export would map to whichever name happens to sit at index 2 of the
+    defaults — historically "blue_cup", silently mislabeling detections).
+    """
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = Path(get_package_share_directory('exploration_rearrangement'))
+        cand = share / 'config' / 'objects.yaml'
+        if cand.exists():
+            return cand
+    except Exception:
+        pass
+    here = Path(__file__).resolve().parent
+    for cand in (
+        here.parent / 'config' / 'objects.yaml',
+        Path.cwd() / 'src' / 'exploration_rearrangement' / 'config' / 'objects.yaml',
+        Path.cwd() / 'config' / 'objects.yaml',
+    ):
+        if cand.exists():
+            return cand
+    return None
+
+
 def _load_objects(
     yaml_path: Optional[Path], logger,
 ) -> Tuple[List[dict], List[str], Dict[int, str]]:
-    if yaml_path is None or not yaml_path.exists():
-        logger.warn('objects_yaml not found; using built-in defaults')
-        cfg = {'objects': _DEFAULT_OBJECTS}
-    else:
+    if yaml_path is not None and yaml_path.exists():
         with open(yaml_path, 'r') as f:
             cfg = yaml.safe_load(f) or {}
+        logger.info(f'objects config loaded from param: {yaml_path}')
+    else:
+        found = _find_objects_yaml()
+        if found is not None:
+            with open(found, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            logger.info(f'objects_yaml not given; auto-loaded from {found}')
+        else:
+            logger.warn(
+                'objects_yaml not given and package config/objects.yaml not '
+                'found; falling back to built-in 3-prompt defaults (may mismatch '
+                'exported model prompts)'
+            )
+            cfg = {'objects': _DEFAULT_OBJECTS}
     defs = cfg.get('objects', [])
     prompts: List[str] = []
     prompt_to_name: Dict[int, str] = {}

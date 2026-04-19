@@ -31,7 +31,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped, Quaternion
+from geometry_msgs.msg import PoseStamped, Quaternion, Vector3
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -40,17 +40,25 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformListener
-from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
+from vision_msgs.msg import (
+    BoundingBox3D, BoundingBox3DArray,
+    Detection3D, Detection3DArray, ObjectHypothesisWithPose,
+)
+from visualization_msgs.msg import Marker, MarkerArray
 
 from .object_detector_node import (
     _Det,
     _annotate,
+    _bbox3d_line_list_points,
+    _color_for,
     _load_objects,
     _load_yolo_model,
     _parse_yolo_tracks,
 )
-from .utils.depth_projection import pixel_to_camera
-from .utils.transform_utils import transform_point_to_frame
+from .utils.depth_projection import (
+    estimate_bbox_3d, estimate_bbox_3d_from_mask, pixel_to_camera,
+)
+from .utils.transform_utils import lookup_pose, transform_point_to_frame
 
 
 # Stretch 3's gripper D405 sits under /gripper_camera in the stretch_core
@@ -111,13 +119,16 @@ class FineObjectDetectorNode(Node):
         self.declare_parameter('iou_threshold', 0.45)
         self.declare_parameter('imgsz', 640)
         self.declare_parameter('device', '')
-        self.declare_parameter('ema_alpha', 0.3)
+        self.declare_parameter('ema_alpha', 1.0)
         self.declare_parameter('merge_dist_m', 0.3)  # teleport-replace threshold
+        self.declare_parameter('bbox_line_width', 0.005)
         self.declare_parameter('clear_state_on_activate', True)
         self.declare_parameter('publish_debug_image', True)
 
         self.declare_parameter('activate_topic', '/fine_detector/activate')
         self.declare_parameter('detections_topic', '/fine_detector/objects')
+        self.declare_parameter('bboxes_topic', '/fine_detector/bboxes_3d')
+        self.declare_parameter('bbox_markers_topic', '/fine_detector/bboxes_3d_markers')
         self.declare_parameter('debug_image_topic', '/fine_detector/debug_image')
 
         self.mode = str(self.get_parameter('mode').value).lower()
@@ -140,6 +151,7 @@ class FineObjectDetectorNode(Node):
         self.imgsz = int(self.get_parameter('imgsz').value)
         self.ema = float(self.get_parameter('ema_alpha').value)
         self.merge_dist = float(self.get_parameter('merge_dist_m').value)
+        self.bbox_line_width = float(self.get_parameter('bbox_line_width').value)
         self.clear_on_activate = bool(self.get_parameter('clear_state_on_activate').value)
         self.pub_debug = bool(self.get_parameter('publish_debug_image').value)
         device = str(self.get_parameter('device').value) or None
@@ -163,6 +175,8 @@ class FineObjectDetectorNode(Node):
         self.camera_info: Optional[CameraInfo] = None
         self.active: bool = False
         self.smoothed: Dict[str, Tuple[float, float, float]] = {}
+        self.smoothed_sizes: Dict[str, Tuple[float, float, float]] = {}
+        self.orientations: Dict[str, Quaternion] = {}
         self.last_confs: Dict[str, float] = {}
         self._tf_warn_once = False
 
@@ -193,6 +207,12 @@ class FineObjectDetectorNode(Node):
         self.detections_pub = self.create_publisher(
             Detection3DArray, str(self.get_parameter('detections_topic').value), 10,
         )
+        self.bboxes_pub = self.create_publisher(
+            BoundingBox3DArray, str(self.get_parameter('bboxes_topic').value), 10,
+        )
+        self.bbox_markers_pub = self.create_publisher(
+            MarkerArray, str(self.get_parameter('bbox_markers_topic').value), 10,
+        )
         self.debug_img_pub = self.create_publisher(
             Image, str(self.get_parameter('debug_image_topic').value), 2,
         )
@@ -212,6 +232,8 @@ class FineObjectDetectorNode(Node):
         if want and not self.active:
             if self.clear_on_activate:
                 self.smoothed.clear()
+                self.smoothed_sizes.clear()
+                self.orientations.clear()
                 self.last_confs.clear()
             self._tf_warn_once = False
             self.active = True
@@ -255,11 +277,37 @@ class FineObjectDetectorNode(Node):
         cx0 = self.camera_info.k[2]
         cy0 = self.camera_info.k[5]
 
+        cam_to_out_q: Optional[Quaternion] = None
+        if self.output_frame != self.camera_frame:
+            tf = lookup_pose(
+                self.tf_buffer, self.output_frame, self.camera_frame,
+                timeout_sec=0.1,
+            )
+            if tf is not None:
+                cam_to_out_q = tf.transform.rotation
+
         for name, d in best_per_name.items():
             u, v = d.center
-            cam_xyz = pixel_to_camera(depth_img, u, v, fx, fy, cx0, cy0)
-            if cam_xyz is None:
-                continue
+            # Compute the 3D bbox first and use its center as the object
+            # position — percentile-clipped across the full silhouette,
+            # so doesn't flicker with 2D-center pixel jitter the way a
+            # single-pixel back-projection does. pixel_to_camera is the
+            # fallback when the mask/bbox estimator has nothing to work with.
+            if d.mask is not None:
+                bbox_xyz = estimate_bbox_3d_from_mask(
+                    depth_img, d.mask, fx, fy, cx0, cy0,
+                )
+            else:
+                bbox_xyz = estimate_bbox_3d(
+                    depth_img, d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3],
+                    fx, fy, cx0, cy0,
+                )
+            if bbox_xyz is not None:
+                cam_xyz = bbox_xyz[0]
+            else:
+                cam_xyz = pixel_to_camera(depth_img, u, v, fx, fy, cx0, cy0)
+                if cam_xyz is None:
+                    continue
             if self.output_frame == self.camera_frame:
                 world_xyz = cam_xyz
             else:
@@ -280,7 +328,15 @@ class FineObjectDetectorNode(Node):
             )
             self.last_confs[name] = float(d.conf)
 
+            if bbox_xyz is not None:
+                self.smoothed_sizes[name] = _ema_update(
+                    self.smoothed_sizes.get(name), bbox_xyz[1], self.ema,
+                )
+            if cam_to_out_q is not None:
+                self.orientations[name] = cam_to_out_q
+
         self._publish_detections(rgb.header.stamp)
+        self._publish_bboxes_3d(rgb.header.stamp)
 
         if self.pub_debug:
             out_msg = self.bridge.cv2_to_imgmsg(_annotate(bgr, dets), encoding='bgr8')
@@ -303,11 +359,54 @@ class FineObjectDetectorNode(Node):
             hyp.pose.pose.position.x = float(xyz[0])
             hyp.pose.pose.position.y = float(xyz[1])
             hyp.pose.pose.position.z = float(xyz[2])
-            hyp.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+            orient = self.orientations.get(name, Quaternion(x=0.0, y=0.0, z=0.0, w=1.0))
+            hyp.pose.pose.orientation = orient
             det.results.append(hyp)
             det.bbox.center = hyp.pose.pose
+            size = self.smoothed_sizes.get(name)
+            if size is not None:
+                det.bbox.size = Vector3(x=size[0], y=size[1], z=size[2])
             arr.detections.append(det)
         self.detections_pub.publish(arr)
+
+    def _publish_bboxes_3d(self, stamp) -> None:
+        arr = BoundingBox3DArray()
+        arr.header.stamp = stamp
+        arr.header.frame_id = self.output_frame
+        markers = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+        marker_id = 0
+        for name, xyz in self.smoothed.items():
+            size = self.smoothed_sizes.get(name)
+            if size is None:
+                continue
+            box = BoundingBox3D()
+            box.center.position.x = float(xyz[0])
+            box.center.position.y = float(xyz[1])
+            box.center.position.z = float(xyz[2])
+            box.center.orientation = self.orientations.get(
+                name, Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),
+            )
+            box.size = Vector3(x=size[0], y=size[1], z=size[2])
+            arr.boxes.append(box)
+
+            m = Marker()
+            m.header.frame_id = self.output_frame
+            m.header.stamp = stamp
+            m.ns = f'{name}_fine_bbox3d'
+            m.id = marker_id
+            marker_id += 1
+            m.type = Marker.LINE_LIST
+            m.action = Marker.ADD
+            m.pose = box.center
+            m.scale.x = self.bbox_line_width
+            m.color = _color_for(name)
+            m.points = _bbox3d_line_list_points(size)
+            markers.markers.append(m)
+        self.bboxes_pub.publish(arr)
+        self.bbox_markers_pub.publish(markers)
 
 
 def main(args=None) -> None:

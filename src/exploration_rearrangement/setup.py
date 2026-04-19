@@ -40,6 +40,7 @@ setup(
             'manipulation_node = exploration_rearrangement.manipulation_node:main',
             'head_scan_node = exploration_rearrangement.head_scan_node:main',
             'fake_sim_node = exploration_rearrangement.sim.fake_sim_node:main',
+            'fake_planner_inputs = exploration_rearrangement.sim.fake_planner_inputs:main',
             'set_up_yolo_e = exploration_rearrangement.set_up_yolo_e:main',
         ],
     },

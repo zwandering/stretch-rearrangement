@@ -1,0 +1,75 @@
+# Mock inputs for task_planner_node debugging — replaces SLAM + real detection
+# with a single fixture publisher (exploration_rearrangement/sim/fake_planner_inputs.py).
+#
+# Coordinate frame: map. Region polygons come from config/regions.yaml:
+#   A: (+x, +y) quadrant   place_anchor [ 1.5,  1.5, 0.0]
+#   B: (-x, +y) quadrant   place_anchor [-1.5,  1.5, 0.0]
+#   C: (+x, -y) quadrant   place_anchor [ 1.5, -1.5, 3.14]
+#   D: (-x, -y) quadrant   place_anchor [-1.5, -1.5, 3.14]
+#
+# Every object `xyz` below has been hand-checked to fall inside the stated region.
+
+default_scenario: quadrants_mixed
+
+# Empty OccupancyGrid centered on the origin; the planner only logs metadata
+# from /map, but the TRANSIENT_LOCAL subscription needs *something* to latch.
+map:
+  resolution: 0.1
+  width: 80
+  height: 80
+  origin: [-4.0, -4.0]   # covers x,y in [-4, 4]
+
+scenarios:
+
+  quadrants_mixed:
+    description: "Happy path — each object sits in a different region; one instruction exercises three pick-places."
+    robot_xy: [0.0, 0.0]          # fake map->base_link
+    objects:
+      - {label: white_bottle, region: A, xyz: [ 1.5,  1.5, 0.40], score: 0.88}
+      - {label: green_cup,    region: B, xyz: [-1.5,  1.5, 0.40], score: 0.83}
+      - {label: blue_cup,     region: C, xyz: [ 1.5, -1.5, 0.40], score: 0.91}
+    instructions:
+      - "move the white bottle to region C, the green cup to region A, and the blue cup to region B"
+      - "put every cup in region D and leave the bottle where it is"
+      - "swap the white bottle and the blue cup"
+
+  already_sorted:
+    description: "Objects already in the instructed regions — planner should return an empty / near-empty task list."
+    robot_xy: [0.0, 0.0]
+    objects:
+      - {label: white_bottle, region: A, xyz: [ 1.5,  1.5, 0.40], score: 0.80}
+      - {label: green_cup,    region: C, xyz: [ 1.5, -1.5, 0.40], score: 0.80}
+      - {label: blue_cup,     region: D, xyz: [-1.5, -1.5, 0.40], score: 0.80}
+    instructions:
+      - "white bottle belongs in region A, green cup in region C, blue cup in region D"
+
+  one_missing:
+    description: "Only 2 of 3 labels detected — exercises the min_detections_before_plan warn path."
+    robot_xy: [0.2, 0.1]
+    objects:
+      - {label: white_bottle, region: B, xyz: [-1.0,  1.0, 0.40], score: 0.85}
+      - {label: green_cup,    region: C, xyz: [ 2.0, -2.0, 0.40], score: 0.80}
+    instructions:
+      - "move the white bottle to region A"
+      - "take the green cup to region D"
+
+  cluster_single_region:
+    description: "All three objects clustered in region A — instruction forces them to spread out."
+    robot_xy: [0.5, 0.5]
+    objects:
+      - {label: white_bottle, region: A, xyz: [ 1.2,  1.2, 0.40], score: 0.82}
+      - {label: green_cup,    region: A, xyz: [ 1.8,  2.4, 0.40], score: 0.79}
+      - {label: blue_cup,     region: A, xyz: [ 2.2,  1.0, 0.40], score: 0.88}
+    instructions:
+      - "move the white bottle to region B, the green cup to region C, the blue cup to region D"
+      - "keep the bottle in region A but move both cups to region D"
+
+  off_map_object:
+    description: "One object outside every region — tests that `current_region=None` flows through the prompt cleanly."
+    robot_xy: [0.0, 0.0]
+    objects:
+      - {label: white_bottle, region: null, xyz: [ 3.5,  3.5, 0.40], score: 0.70}   # outside all 4 quadrants
+      - {label: green_cup,    region: A,    xyz: [ 1.0,  1.0, 0.40], score: 0.85}
+      - {label: blue_cup,     region: D,    xyz: [-1.5, -1.5, 0.40], score: 0.80}
+    instructions:
+      - "put the white bottle somewhere safe and move the cups to region B"
