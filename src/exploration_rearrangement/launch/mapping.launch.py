@@ -1,20 +1,32 @@
-"""Stage 1: offline mapping + object detection.
+"""Stage 1 — detection nodes only (Terminal 3 of 3).
 
-Operator drives the robot manually while ``stretch_nav2 offline_mapping``
-builds a SLAM map and the YOLOE detector latches every target object's
-``map``-frame position. When the map is good and every object has been seen,
-the operator runs:
+Stage 1 runs as three independent terminals so each subsystem can be
+restarted on its own while teleop-mapping:
+
+  Terminal 1:  ros2 launch stretch_nav2 offline_mapping.launch.py
+               (this already includes the Stretch driver — do NOT also
+                start ``stretch_core stretch_driver.launch.py``)
+
+  Terminal 2:  ros2 launch realsense2_camera rs_launch.py \\
+                   enable_color:=true enable_depth:=true \\
+                   align_depth.enable:=true pointcloud.enable:=true
+               (or whichever realsense launch you normally use onboard)
+
+  Terminal 3:  ros2 launch exploration_rearrangement mapping.launch.py
+               (this file — runs the YOLOE detector that latches each
+                target object's map-frame position)
+
+When the SLAM map looks complete and every target object has been seen
+by the detector at least once, the operator runs:
 
     ros2 service call /detector/snapshot std_srvs/srv/Trigger
     ros2 run nav2_map_server map_saver_cli -f <name>
 
-to persist a ``<name>.{pgm,yaml}`` and the matching object snapshot YAML.
+to persist ``<name>.{pgm,yaml}`` and the matching object snapshot YAML.
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -23,14 +35,11 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     pkg = FindPackageShare('exploration_rearrangement')
     objects_yaml = PathJoinSubstitution([pkg, 'config', 'objects.yaml'])
-    rviz_cfg = PathJoinSubstitution([pkg, 'rviz', 'rearrangement.rviz'])
 
-    run_rviz = LaunchConfiguration('run_rviz')
     yolo_model = LaunchConfiguration('yolo_model')
     objects_snapshot = LaunchConfiguration('objects_snapshot')
 
     args = [
-        DeclareLaunchArgument('run_rviz', default_value='true'),
         DeclareLaunchArgument('yolo_model', default_value='yoloe-11s-seg.pt',
                               description='YOLOE weights or exported .engine path'),
         DeclareLaunchArgument(
@@ -41,13 +50,6 @@ def generate_launch_description():
                          '(or on shutdown).'),
         ),
     ]
-
-    offline_mapping = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            FindPackageShare('stretch_nav2'),
-            '/launch/offline_mapping.launch.py',
-        ]),
-    )
 
     detector = Node(
         package='exploration_rearrangement', executable='object_detector_node',
@@ -60,10 +62,4 @@ def generate_launch_description():
         }],
     )
 
-    rviz = Node(
-        package='rviz2', executable='rviz2', name='rviz2',
-        arguments=['-d', rviz_cfg], output='log',
-        condition=IfCondition(run_rviz),
-    )
-
-    return LaunchDescription(args + [offline_mapping, detector, rviz])
+    return LaunchDescription(args + [detector])

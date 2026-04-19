@@ -28,12 +28,30 @@ node executes pick/place at each handoff.
 
 ### Stage 1 — Mapping + object snapshot (one-time, offline)
 
+Stage 1 runs as **three separate terminals** so each subsystem can be
+restarted independently while teleop-mapping. Do NOT bundle them into
+one launch file, and do NOT separately start `stretch_core
+stretch_driver.launch.py` — `stretch_nav2 offline_mapping.launch.py`
+already brings the driver up.
+
 ```bash
-ros2 launch stretch_core stretch_driver.launch.py
+# Terminal 1 — SLAM + Stretch driver (driver is included by this launch)
+ros2 launch stretch_nav2 offline_mapping.launch.py
+
+# Terminal 2 — RealSense camera(s) onboard
+ros2 launch realsense2_camera rs_launch.py \
+    enable_color:=true enable_depth:=true \
+    align_depth.enable:=true pointcloud.enable:=true
+
+# Terminal 3 — YOLOE detector (latches each object's map-frame position)
 ros2 launch exploration_rearrangement mapping.launch.py \
     objects_snapshot:=$HOME/maps/myroom_objects.yaml
-# Teleop drives the robot until every target object has been seen
-# at least once and the SLAM map looks complete.
+```
+
+Then teleop the robot. When the SLAM map looks complete and every
+target object has been seen by the detector at least once:
+
+```bash
 ros2 service call /detector/snapshot std_srvs/srv/Trigger
 ros2 run nav2_map_server map_saver_cli -f $HOME/maps/myroom
 ```
