@@ -45,10 +45,11 @@ class ManipulationNode(Node):
         self.declare_parameter('switch_to_navigation_srv', '/switch_to_navigation_mode')
         self.declare_parameter('stow_srv', '/stow_the_robot')
         self.declare_parameter('pick_height_m', 0.75)
-        # place is just "drop on the ground above the place_anchor": lower
-        # the lift to drop_height_m, extend the arm, open the gripper,
-        # retract. No table-place geometry, no surface detection.
-        self.declare_parameter('drop_height_m', 0.20)
+        # place is just "drop into the bucket above the place_anchor": lift
+        # the gripper to drop_height_m (a few cm above the bucket rim),
+        # extend the arm over the bucket, open the gripper, retract.
+        # Default 0.55 m clears a ~45 cm bucket rim by ~10 cm.
+        self.declare_parameter('drop_height_m', 0.55)
         self.declare_parameter('arm_extend_m', 0.30)
 
         cb = ReentrantCallbackGroup()
@@ -135,13 +136,15 @@ class ManipulationNode(Node):
         return result
 
     def _exec_place(self, goal_handle: ServerGoalHandle):
-        """Drop the held object on the floor above the current place_anchor.
+        """Drop the held object into a bucket above the current place_anchor.
 
         The base has already been parked at the place_anchor's xy by nav,
-        so all we do here is: lift down to drop_height_m, extend the arm,
-        open the gripper to release, retract, stow. The plan's place pose
-        is not used by this server — only the regions.yaml place_anchor
-        (which nav already drove to) determines where the object lands.
+        so all we do here is: lift the gripper to drop_height_m (a few cm
+        above the bucket rim, default 0.55 m for a ~45 cm bucket), extend
+        the arm over the bucket, open the gripper to release, retract,
+        stow. The plan's place pose is not used by this server — only the
+        regions.yaml place_anchor (which nav already drove to) determines
+        where the bucket should be.
         """
         self._call_trigger(self.switch_pos_cli)
         ok = (
