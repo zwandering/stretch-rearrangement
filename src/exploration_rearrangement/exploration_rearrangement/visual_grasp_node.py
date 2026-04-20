@@ -203,6 +203,12 @@ class IKVisualGrasp(HelloNode):
         print("visual_grasp: within delta — closing gripper")
         self.picked = True
         self.move_to_pose({'joint_gripper_finger_left': 0.2}, blocking=True)
+        # SG3 gripper: FollowJointTrajectory reports succeeded as soon as the
+        # fingers hit position tolerance, but when the fingers stall against
+        # the object the grip force keeps building for another ~1 s. Without
+        # a settle delay, the arm retract / nav start moves the object before
+        # the grip is firm and the object slips out.
+        time.sleep(1.5)
         self.move_to_pose({'joint_arm': 0.0}, blocking=True)
         # Hand control back to nav: the executor immediately drives the base
         # to the place anchor after /visual_grasp/done, which needs nav mode.
