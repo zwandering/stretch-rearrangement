@@ -157,6 +157,7 @@ class _CamSource:
     bboxes_pub: Any = None
     bbox_markers_pub: Any = None
     debug_img_pub: Any = None
+    conf_th: float = 0.0
 
 
 class FineObjectDetectorNode(Node):
@@ -168,6 +169,7 @@ class FineObjectDetectorNode(Node):
         self.declare_parameter('model_path', 'yoloe-11s-seg.pt')
         self.declare_parameter('objects_yaml', '')
         self.declare_parameter('conf_threshold', 0.30)
+        self.declare_parameter('head_conf_threshold', 0.10)
         self.declare_parameter('iou_threshold', 0.45)
         self.declare_parameter('imgsz', 640)
         self.declare_parameter('device', '')
@@ -271,6 +273,7 @@ class FineObjectDetectorNode(Node):
         gripper_src.debug_img_pub = self.create_publisher(
             Image, str(self.get_parameter('debug_image_topic').value), 2,
         )
+        gripper_src.conf_th = self.conf_th
         self.sources.append(gripper_src)
 
         if self.enable_head:
@@ -294,6 +297,7 @@ class FineObjectDetectorNode(Node):
             head_src.debug_img_pub = self.create_publisher(
                 Image, str(self.get_parameter('head_debug_image_topic').value), 2,
             )
+            head_src.conf_th = float(self.get_parameter('head_conf_threshold').value)
             self.sources.append(head_src)
 
         # Synchronizers must be stored, otherwise they get garbage-collected.
@@ -390,7 +394,7 @@ class FineObjectDetectorNode(Node):
         try:
             with self._model_lock:
                 results = self.model.predict(
-                    bgr, conf=self.conf_th, iou=self.iou_th,
+                    bgr, conf=src.conf_th, iou=self.iou_th,
                     imgsz=self.imgsz, verbose=False,
                 )
         except Exception as e:
