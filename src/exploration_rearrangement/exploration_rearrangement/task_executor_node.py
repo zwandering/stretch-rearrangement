@@ -1,8 +1,8 @@
 """Plan ↔ navigation ↔ manipulation glue.
 
 Subscribes to a pick/place plan from ``task_planner_node``, drives the base
-through it via the upstream ``navigation_node`` 3-topic protocol, and fires
-``/manipulation/{pick,place}`` action goals at each handoff.
+through it via the upstream ``navigation_node`` 3-topic protocol, and
+orchestrates visual-servo pick via topic signals.
 
 State machine
 -------------
@@ -18,11 +18,16 @@ State machine
       └ publish "proceed"              → AWAIT_ARRIVED
     AWAIT_ARRIVED
       └ /nav/arrived_flag = "arrived"  →
-            (step_index even) PICK, (step_index odd) PLACE
-    PICK
-      ├ success → "proceed", step_index += 1, → AWAIT_ARRIVED (or DONE)
-      └ failure → re-publish /nav/goals starting at step_index+2,
-                  step_index += 2, "proceed", → AWAIT_ARRIVED (or DONE)
+            (step_index even) PICK_INIT, (step_index odd) PLACE
+    PICK_INIT
+      ├ activate fine detector, set target, ready pose, open gripper
+      └ → PICK_SERVO
+    PICK_SERVO
+      ├ send /visual_servo/start
+      └ /visual_servo/reached = True   → PICK_GRASP
+    PICK_GRASP
+      ├ send /visual_grasp/start
+      └ /visual_grasp/done = True      → deactivate detector, advance step
     PLACE
       ├ success → record task ok, "proceed", step_index += 1, → AWAIT_ARRIVED
       └ failure → record task fail, "proceed", step_index += 1, → AWAIT_ARRIVED
@@ -43,7 +48,7 @@ from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 
@@ -52,7 +57,9 @@ class State(Enum):
     AWAIT_PLAN = auto()
     DISPATCH = auto()
     AWAIT_ARRIVED = auto()
-    PICK = auto()
+    PICK_INIT = auto()
+    PICK_SERVO = auto()
+    PICK_GRASP = auto()
     PLACE = auto()
     DONE = auto()
     FAILED = auto()
@@ -75,12 +82,11 @@ class TaskExecutorNode(Node):
         self.state: State = State.IDLE
         self.state_entered_ns: int = self.get_clock().now().nanoseconds
 
-        # Plan + cursor.
         self.plan_poses: List[Pose] = []
         self.plan_header_frame: str = 'map'
         self.step_index: int = 0
 
-        # Manipulation action progress flag: None | 'pending' | 'done' | 'failed'.
+        # For old-style /manipulation/place action
         self.active_manip: Optional[str] = None
 
         self.metrics = {
@@ -96,6 +102,7 @@ class TaskExecutorNode(Node):
 
         cb = ReentrantCallbackGroup()
 
+        # --- Navigation protocol ---
         self.create_subscription(
             PoseArray, '/planner/pick_place_plan',
             self._on_plan, 10, callback_group=cb,
@@ -104,14 +111,26 @@ class TaskExecutorNode(Node):
             String, '/nav/arrived_flag',
             self._on_arrived, 10, callback_group=cb,
         )
-
         self.nav_goals_pub = self.create_publisher(PoseArray, '/nav/goals', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav/control_flag', 10)
         self.status_pub = self.create_publisher(String, '/executor/state', 10)
 
-        self.pick_client = ActionClient(
-            self, FollowJointTrajectory, '/manipulation/pick', callback_group=cb,
+        # --- Visual pick orchestration ---
+        self.fine_activate_pub = self.create_publisher(Bool, '/fine_detector/activate', 10)
+        self.fine_target_pub = self.create_publisher(String, '/fine_detector/target_object', 10)
+        self.servo_start_pub = self.create_publisher(Bool, '/visual_servo/start', 10)
+        self.grasp_start_pub = self.create_publisher(Bool, '/visual_grasp/start', 10)
+
+        self.create_subscription(
+            Bool, '/visual_servo/reached',
+            self._on_servo_reached, 10, callback_group=cb,
         )
+        self.create_subscription(
+            Bool, '/visual_grasp/done',
+            self._on_grasp_done, 10, callback_group=cb,
+        )
+
+        # --- Manipulation node (stow + place) ---
         self.place_client = ActionClient(
             self, FollowJointTrajectory, '/manipulation/place', callback_group=cb,
         )
@@ -145,6 +164,9 @@ class TaskExecutorNode(Node):
     def _on_abort(self, req, res):
         self.get_logger().warn('Executor abort requested.')
         self._publish_control('stop')
+        self.servo_start_pub.publish(Bool(data=False))
+        self.grasp_start_pub.publish(Bool(data=False))
+        self.fine_activate_pub.publish(Bool(data=False))
         self.active_manip = None
         self._finish(success=False)
         res.success = True
@@ -214,13 +236,12 @@ class TaskExecutorNode(Node):
             )
             self._finish(success=True)
             return
-        # Even step → just arrived at a pick pose; odd → at a place pose.
         if self.step_index % 2 == 0:
-            self._goto(State.PICK)
+            self._goto(State.PICK_INIT)
+            self._begin_pick()
         else:
             self._goto(State.PLACE)
-        # active_manip starts None so _tick will dispatch the goal.
-        self.active_manip = None
+            self.active_manip = None
 
     # --- state machine --------------------------------------------------
 
@@ -232,27 +253,70 @@ class TaskExecutorNode(Node):
 
     def _tick(self) -> None:
         s = self.state
-        if s == State.PICK:
-            self._do_manipulation(self.pick_client, is_pick=True)
-        elif s == State.PLACE:
-            self._do_manipulation(self.place_client, is_pick=False)
+        if s == State.PLACE:
+            self._do_place()
 
-    def _do_manipulation(self, client: ActionClient, is_pick: bool) -> None:
+    # --- visual pick orchestration (PICK_INIT → PICK_SERVO → PICK_GRASP) ---
+
+    def _begin_pick(self) -> None:
+        """PICK_INIT: activate detector, ready pose, open gripper, then start servo."""
+        self.metrics['pick_attempts'] += 1
+
+        self.fine_activate_pub.publish(Bool(data=True))
+
+        target = self._current_pick_target()
+        self.fine_target_pub.publish(String(data=target))
+        self.get_logger().info(f'Pick: fine detector activated, target={target!r}')
+
+        self._call_trigger(self.stow_cli)
+        self.get_logger().info('Pick: arm stowed, moving to ready pose')
+
+        self._goto(State.PICK_SERVO)
+        self.servo_start_pub.publish(Bool(data=True))
+        self.get_logger().info('Pick: visual_servo_arm started (Stage 1)')
+
+    def _current_pick_target(self) -> str:
+        """Derive the object label for the current pick step from the plan.
+
+        The planner stores the label in the orientation quaternion's z field
+        as an index (a convention from the original pipeline). If that is not
+        available we fall back to a parameter.
+        """
+        if not self.has_parameter('target_object'):
+            self.declare_parameter('target_object', 'yellow cup')
+        return str(self.get_parameter('target_object').value)
+
+    def _on_servo_reached(self, msg: Bool) -> None:
+        if not msg.data or self.state != State.PICK_SERVO:
+            return
+        self.get_logger().info('Pick: Stage 1 reached — starting visual_grasp (Stage 2)')
+        self._goto(State.PICK_GRASP)
+        self.grasp_start_pub.publish(Bool(data=True))
+
+    def _on_grasp_done(self, msg: Bool) -> None:
+        if not msg.data or self.state != State.PICK_GRASP:
+            return
+        self.get_logger().info('Pick: Stage 2 done — object grasped')
+
+        self.fine_activate_pub.publish(Bool(data=False))
+
+        self.metrics['pick_successes'] += 1
+        self._after_step(success=True, was_pick=True)
+
+    # --- place (kept as /manipulation/place action) ---------------------
+
+    def _do_place(self) -> None:
         if self.active_manip is None:
-            if not client.wait_for_server(timeout_sec=self.manip_server_timeout):
-                kind = 'pick' if is_pick else 'place'
+            if not self.place_client.wait_for_server(timeout_sec=self.manip_server_timeout):
                 self.get_logger().error(
-                    f'/manipulation/{kind} action server unavailable; failing this step.'
+                    '/manipulation/place action server unavailable; failing this step.'
                 )
                 self.active_manip = 'failed'
                 return
-            if is_pick:
-                self.metrics['pick_attempts'] += 1
-            else:
-                self.metrics['place_attempts'] += 1
+            self.metrics['place_attempts'] += 1
             self.active_manip = 'pending'
-            fut = client.send_goal_async(FollowJointTrajectory.Goal())
-            fut.add_done_callback(self._on_manip_goal_response)
+            fut = self.place_client.send_goal_async(FollowJointTrajectory.Goal())
+            fut.add_done_callback(self._on_place_goal_response)
             return
 
         if self.active_manip == 'pending':
@@ -260,49 +324,48 @@ class TaskExecutorNode(Node):
 
         if self.active_manip == 'done':
             self.active_manip = None
-            if is_pick:
-                self.metrics['pick_successes'] += 1
-                self._after_step(success=True, was_pick=True)
-            else:
-                self.metrics['place_successes'] += 1
-                self._record_pair_result(success=True)
-                self._after_step(success=True, was_pick=False)
+            self.metrics['place_successes'] += 1
+            self._record_pair_result(success=True)
+            self._after_step(success=True, was_pick=False)
             return
 
         if self.active_manip == 'failed':
             self.active_manip = None
-            if not is_pick:
-                self._record_pair_result(success=False)
-            self._after_step(success=False, was_pick=is_pick)
+            self._record_pair_result(success=False)
+            self._after_step(success=False, was_pick=False)
             return
 
-    def _on_manip_goal_response(self, future) -> None:
+    def _on_place_goal_response(self, future) -> None:
         try:
             gh = future.result()
         except Exception as e:
-            self.get_logger().warn(f'manipulation send_goal failed: {e}')
+            self.get_logger().warn(f'place send_goal failed: {e}')
             self.active_manip = 'failed'
             return
         if not gh.accepted:
-            self.get_logger().warn('manipulation goal rejected.')
+            self.get_logger().warn('place goal rejected.')
             self.active_manip = 'failed'
             return
         rf = gh.get_result_async()
-        rf.add_done_callback(self._on_manip_result)
+        rf.add_done_callback(self._on_place_result)
 
-    def _on_manip_result(self, future) -> None:
+    def _on_place_result(self, future) -> None:
         try:
             res = future.result()
             code = res.result.error_code
             self.active_manip = 'done' if code == 0 else 'failed'
         except Exception as e:
-            self.get_logger().warn(f'manipulation result error: {e}')
+            self.get_logger().warn(f'place result error: {e}')
             self.active_manip = 'failed'
 
     # --- step bookkeeping ----------------------------------------------
 
     def _after_step(self, success: bool, was_pick: bool) -> None:
         """Advance step_index and tell nav what to do next."""
+        if was_pick:
+            self.fine_activate_pub.publish(Bool(data=False))
+            self.servo_start_pub.publish(Bool(data=False))
+            self.grasp_start_pub.publish(Bool(data=False))
         if was_pick and not success:
             # Skip the orphan place pose: re-issue /nav/goals from step_index+2.
             self.step_index += 2

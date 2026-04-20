@@ -1,32 +1,32 @@
+"""Fine IK grasp using the D405 gripper camera via fine_object_detector_node.
+
+Passive node — sits idle until it receives Bool(True) on /visual_grasp/start.
+On start it IK-steps toward the target (from /fine_detector/objects, D405
+gripper camera), closes the gripper when close enough, retracts the arm, then
+publishes Bool(True) on /visual_grasp/done and returns to idle.
+
+The task_executor is responsible for:
+  - activating fine_object_detector_node and setting target_object
+  - running visual_servo_arm (Stage 1) first so the object is in D405 FOV
+  - sending /visual_grasp/start after Stage 1 completes
+  - listening for /visual_grasp/done to know when pick is done
+"""
+
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 import numpy as np
-from geometry_msgs.msg import Pose, PoseStamped
-from shape_msgs.msg import SolidPrimitive
-from control_msgs.action import FollowJointTrajectory
+from geometry_msgs.msg import PoseStamped
 from hello_helpers.hello_misc import HelloNode
 import threading
 import tf2_ros
-from tf2_geometry_msgs import TransformStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from vision_msgs.msg import Detection3DArray
 from .manipulation import ik_ros_utils as ik
 import ikpy
 
-# Make sure to run:
-#   ros2 launch stretch_core stretch_driver.launch.py
 
 class IKVisualGrasp(HelloNode):
-    """IK target-following fed by the D405 fine detector, with pick.
-
-    Same IK stepping logic as target_following.py / grasp_objects.py, but
-    subscribes to /fine_detector/objects (Detection3DArray in base_link)
-    instead of /object_detector/goal_pose (PoseStamped).
-
-    Set self.target_object_name to the class in config/objects.yaml you
-    want to track (e.g. 'white_bottle', 'green_cup', 'blue_cup').
-    """
 
     def __init__(self):
         HelloNode.__init__(self)
@@ -37,12 +37,14 @@ class IKVisualGrasp(HelloNode):
         self.tf_buffer = None
         self.tf_listener = None
         self.joint_states_lock = threading.Lock()
+        self.joint_state = {}
 
         self.shift_x = 0.04
         self.shift_y = -0.03
-        self.shift_z = 0.03 # 0.03 for bottle and 0.01 for cup
+        self.shift_z = 0.03
 
-        self.target_object_name = "yellow cup"   # ← set before running
+        self.target_object_name = None
+        self.active = False
         self.picked = False
 
     # ── joint states ──────────────────────────────────────────────────
@@ -61,18 +63,43 @@ class IKVisualGrasp(HelloNode):
     # ── TF helpers ────────────────────────────────────────────────────
 
     def get_gripper_pose_in_base_frame(self):
-        gripper_transformed = self.tf_buffer.lookup_transform(
+        return self.tf_buffer.lookup_transform(
             self.target_frame, self.gripper_frame,
             rclpy.time.Time(),
             timeout=rclpy.duration.Duration(seconds=1.0),
         )
-        return gripper_transformed
 
-    # ── fine-detector callback ────────────────────────────────────────
+    # ── start / stop control ─────────────────────────────────────────
+
+    def _on_start(self, msg: Bool):
+        if not msg.data:
+            if self.active:
+                print("visual_grasp: stop received — going idle")
+                self._go_idle()
+            return
+        if self.active:
+            return
+        self.active = True
+        self.picked = False
+
+        if not self.has_parameter('target_object'):
+            self.declare_parameter('target_object', '')
+        param_val = self.get_parameter('target_object').value
+        if param_val:
+            self.target_object_name = param_val
+
+        self.open_gripper()
+        print(f"visual_grasp: started — tracking '{self.target_object_name}', gripper open")
+
+    def _go_idle(self):
+        print("visual_grasp: idle")
+        self.active = False
+        self.target_object_name = None
+
+    # ── detection callback ───────────────────────────────────────────
 
     def detection_callback(self, msg: Detection3DArray):
-        """Each fine-detector frame: extract target pos → IK step → pick when close."""
-        if self.target_object_name is None or self.picked:
+        if not self.active or self.target_object_name is None or self.picked:
             return
 
         goal_pos = self._extract_target_pos(msg)
@@ -84,8 +111,6 @@ class IKVisualGrasp(HelloNode):
             gripper_pos = ik.get_xyz_from_msg(gripper_transformed)
         except Exception as e:
             print(f"Error getting gripper TF: {e}")
-            import traceback
-            traceback.print_exc()
             return
 
         waypoint_pos, waypoint_orient = self.compute_waypoint_to_goal(goal_pos, gripper_pos)
@@ -107,7 +132,6 @@ class IKVisualGrasp(HelloNode):
                 self.pick()
 
     def _extract_target_pos(self, msg: Detection3DArray):
-        """Return the xyz np.array for self.target_object_name, or None."""
         for det in msg.detections:
             if not det.results:
                 continue
@@ -116,7 +140,7 @@ class IKVisualGrasp(HelloNode):
                 return np.array([p.x, p.y, p.z])
         return None
 
-    # ── waypoint computation (same as target_following / grasp_objects) ─
+    # ── waypoint computation ─────────────────────────────────────────
 
     def compute_waypoint_to_goal(self, goal_pos, gripper_pos):
         goal_pos = goal_pos.copy()
@@ -130,92 +154,28 @@ class IKVisualGrasp(HelloNode):
 
         waypoint_pos[2] = max(waypoint_pos[2], goal_pos[2])
         waypoint_orient = ikpy.utils.geometry.rpy_matrix(0.0, 0.0, 0.0)
-
         return waypoint_pos, waypoint_orient
 
     # ── pick ──────────────────────────────────────────────────────────
 
     def pick(self):
-        """Close gripper, retract arm, deactivate the fine detector, go idle."""
-        print("Within delta threshold — picking object")
+        print("visual_grasp: within delta — closing gripper")
         self.picked = True
         self.move_to_pose({'gripper_aperture': -0.2}, blocking=True)
         self.move_to_pose({'joint_arm': 0.0}, blocking=True)
-        self._set_fine_detector(False)
-        self.target_object_name = None
-        print("Pick complete — idle (ready for place)")
-
-    # ── fine-detector helpers ─────────────────────────────────────────
-
-    def _set_fine_detector(self, active: bool):
-        msg = Bool()
-        msg.data = active
-        self.activate_pub.publish(msg)
-
-    # ── ready pose ────────────────────────────────────────────────────
-
-    def move_to_ready_pose(self):
-        self.move_to_pose({
-            'joint_lift': ik.READY_POSE_P2['joint_lift'],
-            'joint_arm': ik.READY_POSE_P2['joint_arm_l0'],
-            'joint_wrist_yaw': ik.READY_POSE_P2['joint_wrist_yaw'],
-            'joint_wrist_pitch': ik.READY_POSE_P2['joint_wrist_pitch'],
-            'gripper_aperture': ik.READY_POSE_P2['gripper_aperture'],
-        }, blocking=True)
-        self.move_to_pose({
-            'joint_head_pan': ik.READY_POSE_P2['joint_head_pan'],
-            'joint_head_tilt': ik.READY_POSE_P2['joint_head_tilt'],
-        }, blocking=True)
-
-    # ── handoff from visual_servo_arm ────────────────────────────────
+        print("visual_grasp: pick complete — publishing done")
+        self.done_pub.publish(Bool(data=True))
+        self._go_idle()
 
     def open_gripper(self):
         self.move_to_pose({'gripper_aperture': 0.5}, blocking=True)
 
-    def go_idle(self):
-        """Deactivate fine detector, clear target, stop controlling."""
-        print("Going idle — deactivating detector, clearing target")
-        if self.started:
-            self._set_fine_detector(False)
-        self.target_object_name = None
-        self.picked = True
-
-    def _on_servo_reached(self, msg: Bool):
-        """Stage 1 finished — start fine detection + IK grasp from current pose."""
-        if not msg.data or self.started:
-            return
-        self.started = True
-        print("Received handoff from visual_servo_arm — starting fine grasp")
-
-        self.open_gripper()
-        print("Gripper open — ready for fine approach")
-
-        self.activate_pub = self.create_publisher(Bool, '/fine_detector/activate', 10)
-
-        self.det_sub = self.create_subscription(
-            Detection3DArray,
-            '/fine_detector/objects',
-            self.detection_callback,
-            qos_profile=1,
-            callback_group=self.callback_group,
-        )
-
-        self._set_fine_detector(True)
-        print("Fine detector activated — waiting for detections")
-
-    # ── node entry point ──────────────────────────────────────────────
+    # ── node entry point ─────────────────────────────────────────────
 
     def main(self):
         HelloNode.main(self, 'visual_grasp', 'visual_grasp', wait_for_first_pointcloud=False)
         self.logger = self.get_logger()
         self.callback_group = ReentrantCallbackGroup()
-        self.started = False
-
-        if not self.has_parameter('target_object'):
-            self.declare_parameter('target_object', '')
-        param_val = self.get_parameter('target_object').value
-        if param_val:
-            self.target_object_name = param_val
 
         self.joint_states_subscriber = self.create_subscription(
             JointState, '/stretch/joint_states',
@@ -225,12 +185,23 @@ class IKVisualGrasp(HelloNode):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        self.done_pub = self.create_publisher(Bool, '/visual_grasp/done', 10)
+
         self.create_subscription(
-            Bool, '/visual_servo/reached',
-            self._on_servo_reached, 10,
+            Bool, '/visual_grasp/start',
+            self._on_start, 10,
             callback_group=self.callback_group,
         )
-        print("Waiting for /visual_servo/reached to start fine grasp...")
+
+        self.det_sub = self.create_subscription(
+            Detection3DArray,
+            '/fine_detector/objects',
+            self.detection_callback,
+            qos_profile=1,
+            callback_group=self.callback_group,
+        )
+
+        print("visual_grasp: ready — waiting for /visual_grasp/start")
 
 
 def main():
@@ -241,9 +212,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if not node.picked:
-            print("Aborted/cancelled — going idle")
-            node.go_idle()
+        if node.active:
+            node._go_idle()
 
 
 if __name__ == '__main__':
