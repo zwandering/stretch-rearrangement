@@ -2,7 +2,7 @@
 
 Subscribes to a pick/place plan from ``task_planner_node``, drives the base
 through it via the upstream ``navigation_node`` 3-topic protocol, and
-orchestrates visual-servo pick via topic signals.
+orchestrates a single-stage visual grasp via topic signals.
 
 State machine
 -------------
@@ -18,15 +18,11 @@ State machine
       └ publish "proceed"              → AWAIT_ARRIVED
     AWAIT_ARRIVED
       └ /nav/arrived_flag = "arrived"  →
-            (step_index even) PICK_INIT, (step_index odd) PLACE
-    PICK_INIT
-      ├ activate fine detector, set target, ready pose, open gripper
-      └ → PICK_SERVO
-    PICK_SERVO
-      ├ send /visual_servo/start
-      └ /visual_servo/reached = True   → PICK_GRASP
-    PICK_GRASP
-      ├ send /visual_grasp/start
+            (step_index even) PICK, (step_index odd) PLACE
+    PICK
+      ├ activate fine detector, set target, send /visual_grasp/start
+      │   (visual_grasp_node moves to READY_POSE_P2 itself, then IK-grasps
+      │    using gripper D405 + /fine_detector/objects)
       └ /visual_grasp/done = True      → deactivate detector, advance step
     PLACE
       ├ success → record task ok, "proceed", step_index += 1, → AWAIT_ARRIVED
@@ -57,9 +53,7 @@ class State(Enum):
     AWAIT_PLAN = auto()
     DISPATCH = auto()
     AWAIT_ARRIVED = auto()
-    PICK_INIT = auto()
-    PICK_SERVO = auto()
-    PICK_GRASP = auto()
+    PICK = auto()
     PLACE = auto()
     DONE = auto()
     FAILED = auto()
@@ -115,16 +109,11 @@ class TaskExecutorNode(Node):
         self.nav_control_pub = self.create_publisher(String, '/nav/control_flag', 10)
         self.status_pub = self.create_publisher(String, '/executor/state', 10)
 
-        # --- Visual pick orchestration ---
+        # --- Visual pick orchestration (single-stage via visual_grasp_node) ---
         self.fine_activate_pub = self.create_publisher(Bool, '/fine_detector/activate', 10)
         self.fine_target_pub = self.create_publisher(String, '/fine_detector/target_object', 10)
-        self.servo_start_pub = self.create_publisher(Bool, '/visual_servo/start', 10)
         self.grasp_start_pub = self.create_publisher(Bool, '/visual_grasp/start', 10)
 
-        self.create_subscription(
-            Bool, '/visual_servo/reached',
-            self._on_servo_reached, 10, callback_group=cb,
-        )
         self.create_subscription(
             Bool, '/visual_grasp/done',
             self._on_grasp_done, 10, callback_group=cb,
@@ -164,7 +153,6 @@ class TaskExecutorNode(Node):
     def _on_abort(self, req, res):
         self.get_logger().warn('Executor abort requested.')
         self._publish_control('stop')
-        self.servo_start_pub.publish(Bool(data=False))
         self.grasp_start_pub.publish(Bool(data=False))
         self.fine_activate_pub.publish(Bool(data=False))
         self.active_manip = None
@@ -237,7 +225,7 @@ class TaskExecutorNode(Node):
             self._finish(success=True)
             return
         if self.step_index % 2 == 0:
-            self._goto(State.PICK_INIT)
+            self._goto(State.PICK)
             self._begin_pick()
         else:
             self._goto(State.PLACE)
@@ -256,21 +244,24 @@ class TaskExecutorNode(Node):
         if s == State.PLACE:
             self._do_place()
 
-    # --- visual pick orchestration (PICK_INIT → PICK_SERVO → PICK_GRASP) ---
+    # --- visual pick orchestration (single stage via visual_grasp_node) ---
 
     def _begin_pick(self) -> None:
-        """PICK_INIT: activate detector, set target, then start servo (which does ready pose)."""
-        self.metrics['pick_attempts'] += 1
+        """PICK: activate fine detector, set target, fire /visual_grasp/start.
 
-        self.fine_activate_pub.publish(Bool(data=True))
+        visual_grasp_node moves the arm to ik.READY_POSE_P2 itself, opens the
+        gripper, then IK-steps using gripper-camera detections. We just wait
+        for /visual_grasp/done.
+        """
+        self.metrics['pick_attempts'] += 1
 
         target = self._current_pick_target()
         self.fine_target_pub.publish(String(data=target))
+        self.fine_activate_pub.publish(Bool(data=True))
         self.get_logger().info(f'Pick: fine detector activated, target={target!r}')
 
-        self._goto(State.PICK_SERVO)
-        self.servo_start_pub.publish(Bool(data=True))
-        self.get_logger().info('Pick: visual_servo_arm started (Stage 1 — will ready + track)')
+        self.grasp_start_pub.publish(Bool(data=True))
+        self.get_logger().info('Pick: visual_grasp started')
 
     def _current_pick_target(self) -> str:
         """Derive the object label for the current pick step from the plan.
@@ -283,17 +274,10 @@ class TaskExecutorNode(Node):
             self.declare_parameter('target_object', 'yellow cup')
         return str(self.get_parameter('target_object').value)
 
-    def _on_servo_reached(self, msg: Bool) -> None:
-        if not msg.data or self.state != State.PICK_SERVO:
-            return
-        self.get_logger().info('Pick: Stage 1 reached — starting visual_grasp (Stage 2)')
-        self._goto(State.PICK_GRASP)
-        self.grasp_start_pub.publish(Bool(data=True))
-
     def _on_grasp_done(self, msg: Bool) -> None:
-        if not msg.data or self.state != State.PICK_GRASP:
+        if not msg.data or self.state != State.PICK:
             return
-        self.get_logger().info('Pick: Stage 2 done — object grasped')
+        self.get_logger().info('Pick: visual_grasp done — object grasped')
 
         self.fine_activate_pub.publish(Bool(data=False))
 
@@ -361,7 +345,6 @@ class TaskExecutorNode(Node):
         """Advance step_index and tell nav what to do next."""
         if was_pick:
             self.fine_activate_pub.publish(Bool(data=False))
-            self.servo_start_pub.publish(Bool(data=False))
             self.grasp_start_pub.publish(Bool(data=False))
         if was_pick and not success:
             # Skip the orphan place pose: re-issue /nav/goals from step_index+2.

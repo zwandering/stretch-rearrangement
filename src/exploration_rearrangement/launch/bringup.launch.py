@@ -89,7 +89,13 @@ def generate_launch_description():
             'mode': 'robot',
             'objects_yaml': objects_yaml,
             'model_path': yolo_model,
+            'enable_head': False,
         }],
+    )
+
+    visual_grasp = Node(
+        package='exploration_rearrangement', executable='visual_grasp_node',
+        name='visual_grasp_node', output='screen',
     )
 
     regions = Node(
@@ -133,6 +139,6 @@ def generate_launch_description():
         detector, fine_detector,
         regions,
         planner, executor,
-        manipulation,
+        manipulation, visual_grasp,
         rviz,
     ])
