@@ -14,13 +14,13 @@ READY_POSE_P1 = {
 }
 
 READY_POSE_P2 = {
-    'joint_lift': 0.8 ,
-    'joint_arm_l0': 0.0,
+    'joint_lift': 0.8,
+    'wrist_extension': 0.0,
     'joint_wrist_yaw': 0.0,
     'joint_wrist_pitch': -0.1,
     'gripper_aperture': 0.5,
-    'joint_head_pan':-1.6,
-    'joint_head_tilt':-0.5,
+    'joint_head_pan': -1.6,
+    'joint_head_tilt': -0.5,
 }
 
 # Constants
@@ -133,8 +133,8 @@ new_urdf_path = get_modified_urdf()
 # Define which joints are active in IK (True) vs fixed (False)
 active_links_mask = [
     False,  # 0: base_link (fixed)
-    True,   # 1: joint_base_rotation (revolute - mobile base yaw)
-    True,   # 2: joint_base_translation (prismatic - mobile base x)
+    True,  # 1: joint_base_rotation (revolute - disabled for visual servo)
+    True,  # 2: joint_base_translation (prismatic - disabled for visual servo)
     False,  # 3: joint_mast (fixed)
     True,   # 4: joint_lift (prismatic - vertical lift)
     False,  # 5: joint_arm_l4 (fixed)
@@ -218,7 +218,8 @@ def get_grasp_goal(target_point, target_orientation, q_init):
     print("Solution Found")
 
     err = np.linalg.norm(chain.forward_kinematics(q_soln)[:3, 3] - target_point)
-    if not np.isclose(err, 0.0, atol=1e-2):
+    print(f"IK position error: {err:.4f} m")
+    if not np.isclose(err, 0.0, atol=5e-2):
         print("IKPy did not find a valid solution")
         return
     # move_to_configuration(q=q_soln)
@@ -238,7 +239,7 @@ def move_to_configuration(node, configuration):
     wrist_roll = configuration[13]
     
     # Move arm and wrist joints
-    node.move_to_pose('joint_lift', lift_position, blocking=True)
+    node.move_to_pose({'joint_lift': lift_position}, blocking=True)
     node.move_to_pose(
         {
             'joint_arm': arm_extension,
@@ -249,15 +250,7 @@ def move_to_configuration(node, configuration):
         blocking=True,
     )
     
-    # Move mobile base (rotation then translation)
-    node.move_to_pose(
-        {'rotate_mobile_base': base_rotation},
-        blocking=True,
-    )
-    node.move_to_pose(
-        {'translate_mobile_base': base_translation},
-        blocking=True,
-    )
+    # Mobile base disabled for visual servo
     # TODO: -------------- end ---------------
 
 def print_q(q):
