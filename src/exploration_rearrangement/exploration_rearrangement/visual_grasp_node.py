@@ -25,7 +25,7 @@ from hello_helpers.hello_misc import HelloNode
 import threading
 import tf2_ros
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from vision_msgs.msg import Detection3DArray
 from .manipulation import ik_ros_utils as ik
 import ikpy
@@ -87,6 +87,10 @@ class IKVisualGrasp(HelloNode):
         self.active = True
         self.picked = False
 
+        # Target precedence: explicit param > whatever the latest
+        # /fine_detector/target_object message gave us. The executor
+        # publishes that topic right before sending /visual_grasp/start, so
+        # in the bringup pipeline the param is unset and we rely on the topic.
         if not self.has_parameter('target_object'):
             self.declare_parameter('target_object', '')
         param_val = self.get_parameter('target_object').value
@@ -97,6 +101,12 @@ class IKVisualGrasp(HelloNode):
         self.move_to_pose(ik.READY_POSE_P2, blocking=True)
         self.open_gripper()
         print(f"visual_grasp: started — tracking '{self.target_object_name}', gripper open")
+
+    def _on_target_object(self, msg):
+        """Latched-style sub: mirror whatever target the executor told the
+        fine detector to track, so we don't need a parameter in bringup."""
+        if msg.data:
+            self.target_object_name = msg.data
 
     def _go_idle(self):
         print("visual_grasp: idle")
@@ -197,6 +207,12 @@ class IKVisualGrasp(HelloNode):
         self.create_subscription(
             Bool, '/visual_grasp/start',
             self._on_start, 10,
+            callback_group=self.callback_group,
+        )
+
+        self.create_subscription(
+            String, '/fine_detector/target_object',
+            self._on_target_object, 10,
             callback_group=self.callback_group,
         )
 
