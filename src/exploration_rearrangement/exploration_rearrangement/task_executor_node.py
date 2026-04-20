@@ -134,12 +134,15 @@ class TaskExecutorNode(Node):
             self._on_grasp_done, 10, callback_group=cb,
         )
 
-        # --- Manipulation node (stow + place) ---
+        # --- Manipulation node (stow + rotate + place) ---
         self.place_client = ActionClient(
             self, FollowJointTrajectory, '/manipulation/place', callback_group=cb,
         )
         self.stow_cli = self.create_client(
             Trigger, '/manipulation/stow', callback_group=cb,
+        )
+        self.rotate_cli = self.create_client(
+            Trigger, '/manipulation/rotate_base', callback_group=cb,
         )
 
         self.create_service(
@@ -147,6 +150,15 @@ class TaskExecutorNode(Node):
         )
         self.create_service(
             Trigger, '/executor/abort', self._on_abort, callback_group=cb,
+        )
+
+        # --- Debug: force the state machine into an arbitrary state ---
+        # Publish e.g. 'PICK', 'PLACE', 'AWAIT_ARRIVED', or 'PICK:0' to
+        # also override step_index. Useful for skipping nav and exercising
+        # one stage in isolation.
+        self.create_subscription(
+            String, '/executor/set_state',
+            self._on_set_state, 10, callback_group=cb,
         )
 
         self.create_timer(0.5, self._tick, callback_group=cb)
@@ -291,13 +303,22 @@ class TaskExecutorNode(Node):
     # --- visual pick orchestration (single stage via visual_grasp_node) ---
 
     def _begin_pick(self) -> None:
-        """PICK: activate fine detector, set target, fire /visual_grasp/start.
+        """PICK: rotate base, activate fine detector, fire /visual_grasp/start.
 
-        visual_grasp_node moves the arm to ik.READY_POSE_P2 itself, opens the
-        gripper, then IK-steps using gripper-camera detections. We just wait
-        for /visual_grasp/done.
+        Step order:
+          1. Rotate the base by ``pre_grasp_rotation_rad`` (default +90°) so
+             the arm side faces the object — nav parks the body facing the
+             object but Stretch's arm extends from the side.
+          2. Set fine detector target + activate it.
+          3. /visual_grasp/start. visual_grasp_node moves the arm to
+             ik.READY_POSE_P2 itself and IK-steps from there.
         """
         self.metrics['pick_attempts'] += 1
+
+        if not self._call_trigger_blocking(self.rotate_cli, timeout_sec=15.0):
+            self.get_logger().warn(
+                'Pick: pre-grasp base rotation failed; continuing anyway.'
+            )
 
         target = self._current_pick_target()
         self.fine_target_pub.publish(String(data=target))
@@ -481,6 +502,73 @@ class TaskExecutorNode(Node):
             return False
         client.call_async(Trigger.Request())
         return True
+
+    def _call_trigger_blocking(self, client, timeout_sec: float = 10.0) -> bool:
+        # Synchronous Trigger call. Polls the future instead of re-entering
+        # rclpy.spin (which deadlocks under MultiThreadedExecutor when
+        # called from within a callback).
+        if not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn('Trigger service unavailable; skipping call.')
+            return False
+        fut = client.call_async(Trigger.Request())
+        deadline = time.time() + timeout_sec
+        while not fut.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not fut.done():
+            return False
+        res = fut.result()
+        return bool(res is not None and res.success)
+
+    # --- debug: state override -----------------------------------------
+
+    def _on_set_state(self, msg: String) -> None:
+        """Force the state machine into an arbitrary state.
+
+        Payload format: ``STATE`` or ``STATE:step_index``. Examples:
+          - ``PICK``           → jump to PICK at the current step_index
+          - ``PLACE:1``        → set step_index=1 then jump to PLACE
+          - ``DISPATCH``       → re-dispatch /nav/goals from step_index
+          - ``DONE`` / ``FAILED`` → finalize and write metrics
+        """
+        payload = msg.data.strip()
+        if not payload:
+            return
+        parts = payload.split(':', 1)
+        name = parts[0].strip().upper()
+        try:
+            new_state = State[name]
+        except KeyError:
+            self.get_logger().warn(
+                f'/executor/set_state: unknown state {name!r}; valid: '
+                f'{[s.name for s in State]}'
+            )
+            return
+        if len(parts) == 2 and parts[1].strip():
+            try:
+                self.step_index = int(parts[1].strip())
+            except ValueError:
+                self.get_logger().warn(
+                    f'/executor/set_state: bad step_index in {payload!r}'
+                )
+                return
+
+        self.get_logger().warn(
+            f'/executor/set_state: forcing {self.state.name} → {new_state.name} '
+            f'(step_index={self.step_index})'
+        )
+        self.active_manip = None
+        self._goto(new_state)
+
+        if new_state == State.DISPATCH:
+            self._dispatch_remaining()
+        elif new_state == State.PICK:
+            self._begin_pick()
+        elif new_state == State.DONE:
+            self._finish(success=True)
+        elif new_state == State.FAILED:
+            self._finish(success=False)
+        # PLACE: _tick will fire _do_place on the next timer cycle.
+        # AWAIT_PLAN / AWAIT_ARRIVED / IDLE: no entry action.
 
 
 def main(args=None) -> None:

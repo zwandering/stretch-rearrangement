@@ -52,6 +52,11 @@ class ManipulationNode(Node):
         # Default 0.55 m clears a ~45 cm bucket rim by ~10 cm.
         self.declare_parameter('drop_height_m', 0.55)
         self.declare_parameter('arm_extend_m', 0.30)
+        # Pre-grasp base rotation after nav arrival. +CCW (left). Default
+        # +90°: nav typically parks the body facing the object, but the
+        # arm extends from the body's side, so we yaw 90° left to put the
+        # arm toward the object before READY_POSE_P2 + visual servoing.
+        self.declare_parameter('pre_grasp_rotation_rad', 1.5708)
 
         cb = ReentrantCallbackGroup()
         self.traj_client = ActionClient(
@@ -88,6 +93,10 @@ class ManipulationNode(Node):
         )
         self.create_service(
             Trigger, '/manipulation/stow', self._on_stow, callback_group=cb,
+        )
+        self.create_service(
+            Trigger, '/manipulation/rotate_base',
+            self._on_rotate_base, callback_group=cb,
         )
 
         self.get_logger().info('ManipulationNode ready.')
@@ -176,6 +185,19 @@ class ManipulationNode(Node):
         ok = self._call_trigger(self.stow_cli)
         res.success = ok
         res.message = 'stow dispatched' if ok else 'stow failed'
+        return res
+
+    def _on_rotate_base(self, req, res):
+        angle = float(self.get_parameter('pre_grasp_rotation_rad').value)
+        self._call_trigger(self.switch_pos_cli)
+        ok = self._send_joints(
+            [('rotate_mobile_base', angle)], time_from_start=3.0,
+        )
+        self._call_trigger(self.switch_nav_cli)
+        res.success = bool(ok)
+        res.message = (
+            f'rotated {angle:.3f} rad' if ok else 'rotate failed'
+        )
         return res
 
     # --- Primitives ------------------------------------------------------
