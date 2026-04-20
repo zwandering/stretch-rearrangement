@@ -131,25 +131,6 @@ def get_modified_urdf():
 
 new_urdf_path = get_modified_urdf()
 # Define which joints are active in IK (True) vs fixed (False)
-active_links_mask = [
-    False,  # 0: base_link (fixed)
-    True,  # 1: joint_base_rotation (revolute - disabled for visual servo)
-    True,  # 2: joint_base_translation (prismatic - disabled for visual servo)
-    False,  # 3: joint_mast (fixed)
-    True,   # 4: joint_lift (prismatic - vertical lift)
-    False,  # 5: joint_arm_l4 (fixed)
-    True,   # 6: joint_arm_l3 (prismatic - arm extension segment 3)
-    True,   # 7: joint_arm_l2 (prismatic - arm extension segment 2)
-    True,   # 8: joint_arm_l1 (prismatic - arm extension segment 1)
-    True,   # 9: joint_arm_l0 (prismatic - arm extension segment 0)
-    True,   # 10: joint_wrist_yaw (revolute - wrist yaw)
-    False,  # 11: joint_wrist_yaw_bottom (fixed)
-    True,   # 12: joint_wrist_pitch (revolute - wrist pitch)
-    True,   # 13: joint_wrist_roll (revolute - wrist roll)
-    False,  # 14: joint_gripper_s3_body (fixed)
-    False,  # 15: joint_grasp_center (fixed - end effector)
-]
-# chain = ikpy.chain.Chain.from_urdf_file(new_urdf_path, active_links_mask=active_links_mask)
 chain = ikpy.chain.Chain.from_urdf_file(new_urdf_path)
 
 for link in chain.links:
@@ -220,7 +201,7 @@ def get_grasp_goal(target_point, target_orientation, q_init):
 
     err = np.linalg.norm(chain.forward_kinematics(q_soln)[:3, 3] - target_point)
     print(f"IK position error: {err:.4f} m")
-    if not np.isclose(err, 0.0, atol=5e-2):
+    if not np.isclose(err, 0.0, atol=IK_POSITION_TOLERANCE):
         print("IKPy did not find a valid solution")
         return
     # move_to_configuration(q=q_soln)
@@ -239,7 +220,7 @@ def move_to_configuration(node, configuration):
     wrist_pitch = configuration[12]
     wrist_roll = configuration[13]
     
-    # Move arm and wrist joints
+    # Move arm and wrist joints first so the arm is settled before the base moves.
     node.move_to_pose({'joint_lift': lift_position}, blocking=True)
     node.move_to_pose(
         {
@@ -250,8 +231,13 @@ def move_to_configuration(node, configuration):
         },
         blocking=True,
     )
-    
-    # Mobile base disabled for visual servo
+
+    # Drive the virtual base joints the IK solver used. base_rotation /
+    # base_translation are deltas from the current base_link pose because
+    # get_current_configuration always seeds them at 0; rotate before
+    # translating so the heading is correct when the base moves forward.
+    node.move_to_pose({'rotate_mobile_base': base_rotation}, blocking=True)
+    node.move_to_pose({'translate_mobile_base': base_translation}, blocking=True)
     # TODO: -------------- end ---------------
 
 def print_q(q):
