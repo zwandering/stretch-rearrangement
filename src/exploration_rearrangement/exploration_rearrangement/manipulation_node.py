@@ -29,8 +29,8 @@ from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
-OPEN_GRIPPER = 0.25
-CLOSED_GRIPPER = -0.10
+OPEN_GRIPPER = 0.8
+CLOSED_GRIPPER = 0.2
 
 
 class ManipulationNode(Node):

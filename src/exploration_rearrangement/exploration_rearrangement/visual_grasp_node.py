@@ -202,7 +202,7 @@ class IKVisualGrasp(HelloNode):
     def pick(self):
         print("visual_grasp: within delta — closing gripper")
         self.picked = True
-        self.move_to_pose({'joint_gripper_finger_left': -0.10}, blocking=True)
+        self.move_to_pose({'joint_gripper_finger_left': 0.2}, blocking=True)
         self.move_to_pose({'joint_arm': 0.0}, blocking=True)
         # Hand control back to nav: the executor immediately drives the base
         # to the place anchor after /visual_grasp/done, which needs nav mode.
@@ -212,7 +212,7 @@ class IKVisualGrasp(HelloNode):
         self._go_idle()
 
     def open_gripper(self):
-        self.move_to_pose({'joint_gripper_finger_left': 0.25}, blocking=True)
+        self.move_to_pose({'joint_gripper_finger_left': 0.8}, blocking=True)
 
     # ── mode-switch helper ──────────────────────────────────────────
 

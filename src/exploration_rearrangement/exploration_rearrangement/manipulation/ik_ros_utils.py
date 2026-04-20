@@ -6,14 +6,14 @@ from geometry_msgs.msg import Pose, PoseStamped
 from tf2_geometry_msgs import TransformStamped
 
 # lift up to table height, wrist yaw in line with base, wrist pitch slightly down, gripper open.
-# Stretch 3 SG3 gripper takes joint_gripper_finger_left (positive = open, 0.25 open / -0.10 closed),
-# matching manipulation_node.py. The legacy 'gripper_aperture' virtual joint's values (0.5, 0.8, -0.2)
-# are out of range on Stretch 3 and are clamped/rejected by the driver.
+# Stretch 3 SG3 gripper takes joint_gripper_finger_left (positive = open, 0.8 open / 0.2 closed),
+# matching manipulation_node.py. The legacy 'gripper_aperture' virtual joint's values are
+# out of range on Stretch 3 and are clamped/rejected by the driver.
 READY_POSE_P1 = {
     'joint_lift': 0.45,
     'joint_wrist_yaw': 1.5,
     'joint_wrist_pitch': -0.1,
-    'joint_gripper_finger_left': 0.25,
+    'joint_gripper_finger_left': 0.8,
 }
 
 READY_POSE_P2 = {
@@ -21,7 +21,7 @@ READY_POSE_P2 = {
     'wrist_extension': 0.0,
     'joint_wrist_yaw': 0.0,
     'joint_wrist_pitch': -0.1,
-    'joint_gripper_finger_left': 0.25,
+    'joint_gripper_finger_left': 0.8,
     'joint_head_pan': -1.6,
     'joint_head_tilt': -0.5,
 }
