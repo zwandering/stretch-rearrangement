@@ -17,7 +17,7 @@ READY_POSE_P1 = {
 }
 
 READY_POSE_P2 = {
-    'joint_lift': 0.8,
+    'joint_lift': 0.7,
     'wrist_extension': 0.0,
     'joint_wrist_yaw': 0.0,
     'joint_wrist_pitch': -0.1,
@@ -226,14 +226,17 @@ def move_to_configuration(node, configuration):
     wrist_pitch = configuration[12]
     wrist_roll = configuration[13]
     
-    # Move lift first to correct height, then extend arm so the arm doesn't collide
+    # Move lift first to correct height, then extend arm so the arm doesn't collide.
+    # Both moves block so the caller can safely check arrival distance afterwards
+    # (the IK-step loop in visual_grasp_node closes the gripper based on the
+    # post-move distance).
     node.move_to_pose({'joint_lift': lift_position}, blocking=True)
     node.move_to_pose({
         'joint_arm': arm_extension,
         'joint_wrist_yaw': wrist_yaw,
         'joint_wrist_pitch': wrist_pitch,
-        'joint_wrist_roll': wrist_roll
-    })
+        'joint_wrist_roll': wrist_roll,
+    }, blocking=True)
     # Only move base if displacement is large enough to avoid camera losing sight of object
     if abs(base_rotation) > 0.1:   # threshold: ~6 degrees
         node.move_to_pose({'rotate_mobile_base': base_rotation})

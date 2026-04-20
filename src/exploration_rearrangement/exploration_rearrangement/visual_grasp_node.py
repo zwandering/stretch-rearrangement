@@ -17,6 +17,8 @@ Caller (task_executor or operator) is responsible for:
   - listening for /visual_grasp/done to know when pick is done
 """
 
+import time
+
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 import numpy as np
@@ -26,6 +28,7 @@ import threading
 import tf2_ros
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 from vision_msgs.msg import Detection3DArray
 from .manipulation import ik_ros_utils as ik
 import ikpy
@@ -44,13 +47,26 @@ class IKVisualGrasp(HelloNode):
         self.joint_states_lock = threading.Lock()
         self.joint_state = {}
 
-        self.shift_x = 0.04
-        self.shift_y = -0.03
-        self.shift_z = 0.03
+        # Shifts previously baked a (+4, -3, +3) cm offset into the grasp
+        # target in base_link. That was responsible for a visible left-bias
+        # (shift_y=-0.03 aimed 3 cm short in +y, i.e. closer to the body than
+        # the object). Start clean; re-introduce calibration values only if
+        # empirical bias is measured.
+        self.shift_x = 0.0
+        self.shift_y = 0.0
+        self.shift_z = 0.0
 
         self.target_object_name = None
         self.active = False
         self.picked = False
+
+        # Mode-switch clients; wired up in main() after HelloNode.main() has
+        # initialized the rclpy context. /manipulation/rotate_base leaves the
+        # driver in navigation mode, and arm/lift/head joint targets only
+        # execute reliably in position mode — so we flip to position on start
+        # and back to navigation after pick so the subsequent nav step works.
+        self.switch_pos_cli = None
+        self.switch_nav_cli = None
 
     # ── joint states ──────────────────────────────────────────────────
 
@@ -82,8 +98,10 @@ class IKVisualGrasp(HelloNode):
                 print("visual_grasp: stop received — going idle")
                 self._go_idle()
             return
-        if self.active:
-            return
+        # Always re-initialize on start(True): the executor re-issues start
+        # at the beginning of every pick (including pick #2 after a place),
+        # and the ready-pose move must run each time regardless of any
+        # stale `active` flag from a prior aborted cycle.
         self.active = True
         self.picked = False
 
@@ -96,6 +114,12 @@ class IKVisualGrasp(HelloNode):
         param_val = self.get_parameter('target_object').value
         if param_val:
             self.target_object_name = param_val
+
+        # The previous step in the executor's pipeline is
+        # /manipulation/rotate_base, which ends in navigation mode. Arm/lift
+        # joint targets don't execute in nav mode, so flip to position
+        # mode before driving the arm to READY_POSE_P2.
+        self._call_trigger(self.switch_pos_cli)
 
         print("visual_grasp: moving to ready pose (READY_POSE_P2)...")
         self.move_to_pose(ik.READY_POSE_P2, blocking=True)
@@ -180,12 +204,32 @@ class IKVisualGrasp(HelloNode):
         self.picked = True
         self.move_to_pose({'joint_gripper_finger_left': -0.10}, blocking=True)
         self.move_to_pose({'joint_arm': 0.0}, blocking=True)
+        # Hand control back to nav: the executor immediately drives the base
+        # to the place anchor after /visual_grasp/done, which needs nav mode.
+        self._call_trigger(self.switch_nav_cli)
         print("visual_grasp: pick complete — publishing done")
         self.done_pub.publish(Bool(data=True))
         self._go_idle()
 
     def open_gripper(self):
         self.move_to_pose({'joint_gripper_finger_left': 0.25}, blocking=True)
+
+    # ── mode-switch helper ──────────────────────────────────────────
+
+    def _call_trigger(self, client) -> bool:
+        if client is None:
+            return False
+        if not client.wait_for_service(timeout_sec=2.0):
+            print(f"visual_grasp: trigger service unavailable ({client.srv_name})")
+            return False
+        fut = client.call_async(Trigger.Request())
+        deadline = time.time() + 4.0
+        while not fut.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not fut.done():
+            return False
+        res = fut.result()
+        return bool(res is not None and res.success)
 
     # ── node entry point ─────────────────────────────────────────────
 
@@ -201,6 +245,15 @@ class IKVisualGrasp(HelloNode):
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        self.switch_pos_cli = self.create_client(
+            Trigger, '/switch_to_position_mode',
+            callback_group=self.callback_group,
+        )
+        self.switch_nav_cli = self.create_client(
+            Trigger, '/switch_to_navigation_mode',
+            callback_group=self.callback_group,
+        )
 
         self.done_pub = self.create_publisher(Bool, '/visual_grasp/done', 10)
 
