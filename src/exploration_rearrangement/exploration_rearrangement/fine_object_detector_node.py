@@ -81,7 +81,7 @@ from .utils.transform_utils import lookup_pose, transform_point_to_frame
 # D405 on gripper (robot) / standalone realsense on bench (debug).
 _GRIPPER_ROBOT_TOPICS = {
     'rgb':   '/gripper_camera/color/image_rect_raw',
-    'depth': '/gripper_camera/aligned_depth_to_color/image_rect_raw',
+    'depth': '/gripper_camera/aligned_depth_to_color/image_raw',
     'info':  '/gripper_camera/color/camera_info',
     'frame': 'gripper_camera_color_optical_frame',
 }
