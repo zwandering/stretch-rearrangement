@@ -49,8 +49,7 @@ class ManipulationNode(Node):
         # place is just "drop into the bucket above the place_anchor": lift
         # the gripper to drop_height_m (a few cm above the bucket rim),
         # extend the arm over the bucket, open the gripper, retract.
-        # Default 0.55 m clears a ~45 cm bucket rim by ~10 cm.
-        self.declare_parameter('drop_height_m', 0.55)
+        self.declare_parameter('drop_height_m', 0.45)
         self.declare_parameter('arm_extend_m', 0.30)
         # Pre-grasp base rotation after nav arrival. +CCW (left). Default
         # +90°: nav typically parks the body facing the object, but the
