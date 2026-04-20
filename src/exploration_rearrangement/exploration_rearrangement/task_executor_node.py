@@ -259,7 +259,7 @@ class TaskExecutorNode(Node):
     # --- visual pick orchestration (PICK_INIT → PICK_SERVO → PICK_GRASP) ---
 
     def _begin_pick(self) -> None:
-        """PICK_INIT: activate detector, ready pose, open gripper, then start servo."""
+        """PICK_INIT: activate detector, set target, then start servo (which does ready pose)."""
         self.metrics['pick_attempts'] += 1
 
         self.fine_activate_pub.publish(Bool(data=True))
@@ -268,12 +268,9 @@ class TaskExecutorNode(Node):
         self.fine_target_pub.publish(String(data=target))
         self.get_logger().info(f'Pick: fine detector activated, target={target!r}')
 
-        self._call_trigger(self.stow_cli)
-        self.get_logger().info('Pick: arm stowed, moving to ready pose')
-
         self._goto(State.PICK_SERVO)
         self.servo_start_pub.publish(Bool(data=True))
-        self.get_logger().info('Pick: visual_servo_arm started (Stage 1)')
+        self.get_logger().info('Pick: visual_servo_arm started (Stage 1 — will ready + track)')
 
     def _current_pick_target(self) -> str:
         """Derive the object label for the current pick step from the plan.

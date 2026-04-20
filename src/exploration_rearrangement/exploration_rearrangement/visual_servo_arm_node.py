@@ -101,7 +101,9 @@ class IKVisualServoArm(HelloNode):
         if param_val:
             self.target_object_name = param_val
 
-        print(f"visual_servo_arm: started — tracking '{self.target_object_name}'")
+        self.move_to_pose(ik.READY_POSE_P1, blocking=True)
+        self.move_to_pose({'gripper_aperture': 0.5}, blocking=True)
+        print(f"visual_servo_arm: ready pose + gripper open — tracking '{self.target_object_name}'")
 
     def _go_idle(self):
         print("visual_servo_arm: idle")
