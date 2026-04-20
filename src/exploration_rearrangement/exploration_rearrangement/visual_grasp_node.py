@@ -178,14 +178,14 @@ class IKVisualGrasp(HelloNode):
     def pick(self):
         print("visual_grasp: within delta — closing gripper")
         self.picked = True
-        self.move_to_pose({'gripper_aperture': -0.2}, blocking=True)
+        self.move_to_pose({'joint_gripper_finger_left': -0.10}, blocking=True)
         self.move_to_pose({'joint_arm': 0.0}, blocking=True)
         print("visual_grasp: pick complete — publishing done")
         self.done_pub.publish(Bool(data=True))
         self._go_idle()
 
     def open_gripper(self):
-        self.move_to_pose({'gripper_aperture': 0.5}, blocking=True)
+        self.move_to_pose({'joint_gripper_finger_left': 0.25}, blocking=True)
 
     # ── node entry point ─────────────────────────────────────────────
 
