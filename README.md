@@ -70,11 +70,15 @@ Point* to read off `(x, y)` for each corner.
 ### Stage 3 — Run
 
 ```bash
-ros2 launch stretch_core stretch_driver.launch.py
+# Terminal 1:
+export GEMINI_API_KEY="xxx"
 ros2 launch exploration_rearrangement bringup.launch.py map:=$HOME/maps/myroom.yaml objects_snapshot:=$HOME/maps/myroom_objects.yaml
 # In RViz: click "2D Pose Estimate" to localize.
+
+# Terminal 2:
 ros2 service call /executor/start std_srvs/srv/Trigger
 ros2 topic pub --once /instruction/text std_msgs/msg/String '{data: "put the orange cup to region B, put the yellow cup to region A."}'
+(Optional) ros2 topic pub --once /nav/control_flag std_msgs/msg/String '{data: "proceed"}'
 ```
 
 The detector keeps running during stage 3, so any object that's been
