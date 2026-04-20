@@ -149,7 +149,8 @@ active_links_mask = [
     False,  # 14: joint_gripper_s3_body (fixed)
     False,  # 15: joint_grasp_center (fixed - end effector)
 ]
-chain = ikpy.chain.Chain.from_urdf_file(new_urdf_path, active_links_mask=active_links_mask)
+# chain = ikpy.chain.Chain.from_urdf_file(new_urdf_path, active_links_mask=active_links_mask)
+chain = ikpy.chain.Chain.from_urdf_file(new_urdf_path)
 
 for link in chain.links:
     print(f"* Link Name: {link.name}, Type: {link.joint_type}")
