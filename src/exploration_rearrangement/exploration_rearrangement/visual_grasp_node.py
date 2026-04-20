@@ -47,14 +47,14 @@ class IKVisualGrasp(HelloNode):
         self.joint_states_lock = threading.Lock()
         self.joint_state = {}
 
-        # Shifts previously baked a (+4, -3, +3) cm offset into the grasp
-        # target in base_link. That was responsible for a visible left-bias
-        # (shift_y=-0.03 aimed 3 cm short in +y, i.e. closer to the body than
-        # the object). Start clean; re-introduce calibration values only if
-        # empirical bias is measured.
+        # Grasp-target offset in base_link. x/y kept at 0 after removing the
+        # previous calibration that produced a left-bias. +z=2.5 cm is a
+        # heuristic to aim slightly above the detected object centroid so the
+        # fingers close around the object body rather than scraping the
+        # supporting surface.
         self.shift_x = 0.0
         self.shift_y = 0.0
-        self.shift_z = 0.0
+        self.shift_z = 0.025
 
         self.target_object_name = None
         self.active = False
