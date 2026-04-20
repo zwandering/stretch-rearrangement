@@ -1,14 +1,19 @@
-"""Fine IK grasp using the D405 gripper camera via fine_object_detector_node.
+"""Single-stage IK grasp using the D405 gripper camera via fine_object_detector_node.
 
 Passive node — sits idle until it receives Bool(True) on /visual_grasp/start.
-On start it IK-steps toward the target (from /fine_detector/objects, D405
-gripper camera), closes the gripper when close enough, retracts the arm, then
+On start it (a) moves the arm to ik.READY_POSE_P2, (b) opens the gripper,
+(c) IK-steps toward the target (from /fine_detector/objects, D405 gripper
+camera), closes the gripper when close enough, retracts the arm, then
 publishes Bool(True) on /visual_grasp/done and returns to idle.
 
-The task_executor is responsible for:
-  - activating fine_object_detector_node and setting target_object
-  - running visual_servo_arm (Stage 1) first so the object is in D405 FOV
-  - sending /visual_grasp/start after Stage 1 completes
+The READY_POSE_P2 step replaces what visual_servo_arm used to do — once the
+arm is in pre-grasp pose the gripper D405 sees the object directly, so the
+coarse head-camera servo stage is no longer required.
+
+Caller (task_executor or operator) is responsible for:
+  - setting fine_detector target via /fine_detector/target_object
+  - activating fine_object_detector_node via /fine_detector/activate (Bool true)
+  - sending /visual_grasp/start after the above
   - listening for /visual_grasp/done to know when pick is done
 """
 
@@ -88,6 +93,8 @@ class IKVisualGrasp(HelloNode):
         if param_val:
             self.target_object_name = param_val
 
+        print("visual_grasp: moving to ready pose (READY_POSE_P2)...")
+        self.move_to_pose(ik.READY_POSE_P2, blocking=True)
         self.open_gripper()
         print(f"visual_grasp: started — tracking '{self.target_object_name}', gripper open")
 
