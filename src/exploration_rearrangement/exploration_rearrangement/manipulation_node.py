@@ -13,6 +13,7 @@ Joints used (Stretch 3 driver in position mode):
     rotate_mobile_base         — incremental yaw rotation [rad] (position mode)
 """
 
+import time
 from typing import List, Optional
 
 import numpy as np
@@ -200,14 +201,14 @@ class ManipulationNode(Node):
         goal.trajectory = traj
 
         fut = self.traj_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
+        if not self._wait_for_future(fut, timeout_sec=5.0):
+            return False
         gh = fut.result()
         if gh is None or not gh.accepted:
             return False
         result_fut = gh.get_result_async()
-        rclpy.spin_until_future_complete(
-            self, result_fut, timeout_sec=time_from_start + 4.0,
-        )
+        if not self._wait_for_future(result_fut, timeout_sec=time_from_start + 4.0):
+            return False
         res = result_fut.result()
         if res is None:
             return False
@@ -217,9 +218,20 @@ class ManipulationNode(Node):
         if not client.wait_for_service(timeout_sec=2.0):
             return False
         fut = client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=4.0)
+        if not self._wait_for_future(fut, timeout_sec=4.0):
+            return False
         res = fut.result()
         return bool(res is not None and res.success)
+
+    def _wait_for_future(self, fut, timeout_sec: float) -> bool:
+        # Don't call rclpy.spin_until_future_complete from inside an action
+        # callback — the node is already owned by MultiThreadedExecutor,
+        # and re-entering spin deadlocks the executor. Poll instead; the
+        # executor's other threads keep servicing the future.
+        deadline = time.time() + timeout_sec
+        while not fut.done() and time.time() < deadline:
+            time.sleep(0.01)
+        return fut.done()
 
 
 def main(args=None) -> None:

@@ -59,6 +59,16 @@ class State(Enum):
     FAILED = auto()
 
 
+# visual_grasp_node does an IK-stepping loop with no internal timeout;
+# bound how long we let it run before declaring this pick a failure and
+# moving to the next pair.
+PICK_TIMEOUT_S = 60.0
+
+# /manipulation/place is a scripted lift→extend→open→retract→stow chain;
+# ~10–15 s in practice. 30 s catches a hung action server.
+PLACE_TIMEOUT_S = 30.0
+
+
 class TaskExecutorNode(Node):
 
     def __init__(self) -> None:
@@ -246,8 +256,37 @@ class TaskExecutorNode(Node):
 
     def _tick(self) -> None:
         s = self.state
-        if s == State.PLACE:
+        if s == State.PICK:
+            self._check_pick_timeout()
+        elif s == State.PLACE:
             self._do_place()
+            self._check_place_timeout()
+
+    def _state_elapsed_s(self) -> float:
+        return (self.get_clock().now().nanoseconds - self.state_entered_ns) / 1e9
+
+    def _check_pick_timeout(self) -> None:
+        if self._state_elapsed_s() < PICK_TIMEOUT_S:
+            return
+        self.get_logger().warn(
+            f'Pick: timeout after {PICK_TIMEOUT_S:.0f}s — visual_grasp did not '
+            'complete; treating as failure and skipping place.'
+        )
+        self.grasp_start_pub.publish(Bool(data=False))
+        self.fine_activate_pub.publish(Bool(data=False))
+        self._record_pair_result(success=False)
+        self._after_step(success=False, was_pick=True)
+
+    def _check_place_timeout(self) -> None:
+        if self.active_manip != 'pending':
+            return
+        if self._state_elapsed_s() < PLACE_TIMEOUT_S:
+            return
+        self.get_logger().warn(
+            f'Place: timeout after {PLACE_TIMEOUT_S:.0f}s — manipulation/place '
+            'did not return; treating as failure.'
+        )
+        self.active_manip = 'failed'
 
     # --- visual pick orchestration (single stage via visual_grasp_node) ---
 
