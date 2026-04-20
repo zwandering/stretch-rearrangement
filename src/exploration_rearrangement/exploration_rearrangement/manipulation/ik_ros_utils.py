@@ -7,7 +7,7 @@ from tf2_geometry_msgs import TransformStamped
 
 # lift up to table height, wrist yaw in line with base, wrist pitch slightly down, gripper open
 READY_POSE_P1 = {
-    'joint_lift': 0.8,
+    'joint_lift': 0.45,
     'joint_wrist_yaw': 1.5,
     'joint_wrist_pitch': -0.1,
     'gripper_aperture': 0.5
@@ -15,10 +15,10 @@ READY_POSE_P1 = {
 
 READY_POSE_P2 = {
     'joint_lift': 0.8,
-    'wrist_extension': 0.0,
+    'joint_arm_l0': 0.0,
     'joint_wrist_yaw': 0.0,
     'joint_wrist_pitch': -0.1,
-    'gripper_aperture': 0.5,
+    'gripper_aperture': 0.8,
     'joint_head_pan': -1.6,
     'joint_head_tilt': -0.5,
 }
@@ -78,10 +78,10 @@ def get_modified_urdf():
         axis=np.array([0.0, 0.0, 1.0]),
         origin=np.eye(4, dtype=np.float64),
         limit=urdfpy.JointLimit(
-            effort=MOBILE_BASE_EFFORT_LIMIT,
-            velocity=MOBILE_BASE_VELOCITY_LIMIT,
-            lower=-np.pi,
-            upper=np.pi
+            effort=100.0,
+            velocity=1.0,
+            lower=-0.5,
+            upper=0.5
         )
     )
     modified_urdf._joints.append(joint_base_rotation)
@@ -103,10 +103,10 @@ def get_modified_urdf():
         axis=np.array([1.0, 0.0, 0.0]),
         origin=np.eye(4, dtype=np.float64),
         limit=urdfpy.JointLimit(
-            effort=MOBILE_BASE_EFFORT_LIMIT,
-            velocity=MOBILE_BASE_VELOCITY_LIMIT,
-            lower=-MOBILE_BASE_TRANSLATION_LIMIT,
-            upper=MOBILE_BASE_TRANSLATION_LIMIT
+            effort=100.0,
+            velocity=1.0,
+            lower=-0.5,
+            upper=0.5
         )
     )
     modified_urdf._joints.append(joint_base_translation)
@@ -192,16 +192,19 @@ def get_current_configuration(joint_state):
         0.0,              # 15: grasp center (fixed)
     ]
 
+def get_current_grasp_pose():
+    q = get_current_configuration()
+    return chain.forward_kinematics(q)
+
 def get_grasp_goal(target_point, target_orientation, q_init):
     # previously the move_to_grasp() function from lab 2
     #   moved to it's own function without the final move_to_configuration() call for convenience in this lab
-    q_soln = chain.inverse_kinematics(target_point, target_orientation, orientation_mode='all', initial_position=q_init)
+    q_soln = chain.inverse_kinematics(target_point, target_orientation, orientation_mode=None, initial_position=q_init)
     # print('Solution:', q_soln)
     print("Solution Found")
 
     err = np.linalg.norm(chain.forward_kinematics(q_soln)[:3, 3] - target_point)
-    print(f"IK position error: {err:.4f} m")
-    if not np.isclose(err, 0.0, atol=IK_POSITION_TOLERANCE):
+    if not np.isclose(err, 0.0, atol=3e-2):
         print("IKPy did not find a valid solution")
         return
     # move_to_configuration(q=q_soln)
@@ -220,24 +223,19 @@ def move_to_configuration(node, configuration):
     wrist_pitch = configuration[12]
     wrist_roll = configuration[13]
     
-    # Move arm and wrist joints first so the arm is settled before the base moves.
+    # Move lift first to correct height, then extend arm so the arm doesn't collide
     node.move_to_pose({'joint_lift': lift_position}, blocking=True)
-    node.move_to_pose(
-        {
-            'joint_arm': arm_extension,
-            'joint_wrist_yaw': wrist_yaw,
-            'joint_wrist_pitch': wrist_pitch,
-            'joint_wrist_roll': wrist_roll,
-        },
-        blocking=True,
-    )
-
-    # Drive the virtual base joints the IK solver used. base_rotation /
-    # base_translation are deltas from the current base_link pose because
-    # get_current_configuration always seeds them at 0; rotate before
-    # translating so the heading is correct when the base moves forward.
-    node.move_to_pose({'rotate_mobile_base': base_rotation}, blocking=True)
-    node.move_to_pose({'translate_mobile_base': base_translation}, blocking=True)
+    node.move_to_pose({
+        'joint_arm': arm_extension,
+        'joint_wrist_yaw': wrist_yaw,
+        'joint_wrist_pitch': wrist_pitch,
+        'joint_wrist_roll': wrist_roll
+    })
+    # Only move base if displacement is large enough to avoid camera losing sight of object
+    if abs(base_rotation) > 0.1:   # threshold: ~6 degrees
+        node.move_to_pose({'rotate_mobile_base': base_rotation})
+    if abs(base_translation) > 0.05:  # threshold: 5 cm
+        node.move_to_pose({'translate_mobile_base': base_translation})
     # TODO: -------------- end ---------------
 
 def print_q(q):
