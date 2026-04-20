@@ -51,7 +51,7 @@ from stretch_nav2.robot_navigator import BasicNavigator, TaskResult
 
 # Distance from the current goal (in meters) at which we cancel Nav2 and hand
 # off to manipulation.
-STOP_DISTANCE_M = 0.15
+STOP_DISTANCE_M = 0.30
 
 # How often we poll TF to measure distance-to-goal while navigating (Hz).
 DISTANCE_CHECK_HZ = 5.0

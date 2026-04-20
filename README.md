@@ -98,17 +98,13 @@ ros2 launch stretch_core d405_basic.launch.py
 
 # Terminal 3 — bringup (nav2 + AMCL + brain + manipulation + visual_grasp)
 export GEMINI_API_KEY="xxx"
-ros2 launch exploration_rearrangement bringup.launch.py \
-    map:=$HOME/maps/myroom.yaml \
-    objects_snapshot:=$HOME/maps/myroom_objects.yaml \
-    yolo_model:=$PWD/yoloe-11s-seg_openvino_model
+ros2 launch exploration_rearrangement bringup.launch.py map:=$HOME/maps/myroom.yaml objects_snapshot:=$HOME/maps/myroom_objects.yaml yolo_model:=$PWD/yoloe-11s-seg_openvino_model
 # In RViz: click "2D Pose Estimate" and click on the robot's true pose to
 # localize against the map.
 
 # Terminal 4 — operator: arm executor, then send the instruction.
 ros2 service call /executor/start std_srvs/srv/Trigger
-ros2 topic pub --once /instruction/text std_msgs/msg/String \
-    '{data: "put the orange cup to region B, put the yellow cup to region A."}'
+ros2 topic pub --once /instruction/text std_msgs/msg/String '{data: "put the orange cup to region B, put the yellow cup to region A."}'
 
 # Optional — manual nudge if nav stalls (rare; executor publishes proceed itself):
 ros2 topic pub --once /nav/control_flag std_msgs/msg/String '{data: "proceed"}'
@@ -180,7 +176,7 @@ ros2 topic echo /visual_grasp/done
 | `/executor/state`                | `std_msgs/String`                           | executor → operator             |
 
 The nav coordinator stops Nav2 when the base is within
-`STOP_DISTANCE_M` metres of each goal (currently `0.15`) and publishes
+`STOP_DISTANCE_M` metres of each goal (currently `0.30`) and publishes
 `"arrived"`. Tune by editing the constant at the top of
 `navigation_node.py`.
 
