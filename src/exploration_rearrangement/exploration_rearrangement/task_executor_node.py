@@ -78,6 +78,7 @@ class TaskExecutorNode(Node):
 
         self.plan_poses: List[Pose] = []
         self.plan_header_frame: str = 'map'
+        self.pick_labels: List[str] = []
         self.step_index: int = 0
 
         # For old-style /manipulation/place action
@@ -100,6 +101,10 @@ class TaskExecutorNode(Node):
         self.create_subscription(
             PoseArray, '/planner/pick_place_plan',
             self._on_plan, 10, callback_group=cb,
+        )
+        self.create_subscription(
+            String, '/planner/pick_labels',
+            self._on_pick_labels, 10, callback_group=cb,
         )
         self.create_subscription(
             String, '/nav/arrived_flag',
@@ -264,15 +269,35 @@ class TaskExecutorNode(Node):
         self.get_logger().info('Pick: visual_grasp started')
 
     def _current_pick_target(self) -> str:
-        """Derive the object label for the current pick step from the plan.
+        """Object label for the current pick step.
 
-        The planner stores the label in the orientation quaternion's z field
-        as an index (a convention from the original pipeline). If that is not
-        available we fall back to a parameter.
+        Picks live at even step indices, so the label index is
+        ``step_index // 2``. The planner publishes labels on
+        ``/planner/pick_labels`` (JSON-encoded list); if that's missing we
+        fall back to the ``target_object`` parameter.
         """
+        idx = self.step_index // 2
+        if 0 <= idx < len(self.pick_labels):
+            return self.pick_labels[idx]
         if not self.has_parameter('target_object'):
             self.declare_parameter('target_object', 'yellow cup')
         return str(self.get_parameter('target_object').value)
+
+    def _on_pick_labels(self, msg: String) -> None:
+        try:
+            labels = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().warn(
+                f'Could not parse /planner/pick_labels: {e}; data={msg.data!r}'
+            )
+            return
+        if not isinstance(labels, list) or not all(isinstance(s, str) for s in labels):
+            self.get_logger().warn(
+                f'/planner/pick_labels payload not a list[str]: {labels!r}'
+            )
+            return
+        self.pick_labels = labels
+        self.get_logger().info(f'Received pick labels: {self.pick_labels}')
 
     def _on_grasp_done(self, msg: Bool) -> None:
         if not msg.data or self.state != State.PICK:

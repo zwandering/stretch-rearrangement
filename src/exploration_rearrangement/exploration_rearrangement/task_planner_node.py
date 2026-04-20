@@ -1,5 +1,6 @@
 """Instruction-driven task planner: natural-language → Gemini VLM → pick/place PoseArray."""
 
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -113,6 +114,12 @@ class TaskPlannerNode(Node):
 
         self.plan_pub = self.create_publisher(
             PoseArray, '/planner/pick_place_plan', 10,
+        )
+        # Per-pick object labels, JSON-encoded list (one entry per pick step,
+        # i.e. len(plan)//2). Side-channel because PoseArray has nowhere to
+        # carry strings.
+        self.labels_pub = self.create_publisher(
+            String, '/planner/pick_labels', 10,
         )
         self.markers_pub = self.create_publisher(
             MarkerArray, '/planner/plan_visualization', 10,
@@ -290,6 +297,7 @@ class TaskPlannerNode(Node):
         pa.header.frame_id = self.map_frame
         pa.header.stamp = self.get_clock().now().to_msg()
 
+        labels: List[str] = []
         for task in plan:
             pick_pose = Pose()
             pick_pose.position = Point(
@@ -312,7 +320,10 @@ class TaskPlannerNode(Node):
             place_pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
             pa.poses.append(place_pose)
 
+            labels.append(str(task.object_label))
+
         self.plan_pub.publish(pa)
+        self.labels_pub.publish(String(data=json.dumps(labels)))
 
     def _publish_plan_markers(self, plan: List[PickPlaceTask]) -> None:
         ma = MarkerArray()
